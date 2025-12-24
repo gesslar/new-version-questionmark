@@ -19,22 +19,16 @@ try {
   }
 
   // Fetch Git tags and find the latest version
-  const tags = execSync(`git fetch --tags && git tag`)
+  const allTags = execSync(`git fetch --tags && git tag`)
     .toString()
     .split('\n')
     .filter(Boolean);
 
-  // TODO: figure out why we're only getting 1 tag
-  //    gesslar / new- version - questionmark@main
-  //    with:
-  //    source: package.json
-  //    version_pattern: v\d +\.\d +\.\d +
-  //
-  //      Tags: ["v1.0.2"]
-  //  Latest tag: "v1.0.2"
-  //  Current version: 1.0.3, Latest version: v1.0.2
+  // Filter tags that match the version pattern
+  const tags = allTags.filter(tag => versionPattern.test(tag));
 
-  core.info(`Tags: ${JSON.stringify(tags)}`);
+  core.info(`All tags: ${JSON.stringify(allTags)}`);
+  core.info(`Filtered tags (matching pattern): ${JSON.stringify(tags)}`);
 
   // Use compare-versions to find the latest tag
   const latestTag = tags.reduce((latest, current) => {
