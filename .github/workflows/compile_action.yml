@@ -41,6 +41,7 @@ jobs:
           fi
 
       - name: Create and push tag
+        id: create_push_tag
         if: steps.check_tag.outputs.tag_exists == 'false'
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -56,6 +57,8 @@ jobs:
           git tag -a "$TAG" "$MERGE_SHA" -m "Version $VERSION"
           git push origin "$TAG"
           echo "Created tag $TAG at $MERGE_SHA"
+          echo
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node.js
         if: steps.check_tag.outputs.tag_exists == 'false'
@@ -96,48 +99,17 @@ jobs:
           git commit -m "Auto-build GitHub Action" &&
           git push origin main
 
-  build-on-tag-push:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Use the default token
         with:
-          fetch-depth: 0
-          ref: main
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install NCC
-        run: npm install -g @vercel/ncc
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Remove old index.js
-        run: rm -fv action/index.js
-
-      - name: Build
-        run: npm run build
-
-      - name: Check for changes in
-        id: changes_check_tag
-        run: |
-          lines_changed=$(git status -s | wc --lines)
-          echo "has_changes=$lines_changed" >> $GITHUB_OUTPUT
-          echo "Lines changed: $lines_changed"
-
-      - name: Publish GitHub Action
-        if: steps.changes_check_tag.outputs.has_changes != '0'
-        run: |
-          git config --global user.email "action@github.com"
-          git config --global user.name "GitHub Action"
-          git add .
-          git commit -m "Auto-build GitHub Action" &&
-          git push origin main
+          tag_name: ${{ steps.create_push_tag.outputs.tag }}
+          release_name: Release ${{ steps.create_push_tag.outputs.tag }}
+          body: |
+            This is an update that has been automatically built. For the love
+            of all that is holy, unholy, or morally grey, someone please take
+            the keyboard away from me. I'm going to run out of repo space soon.
+          draft: false
+          prerelease: false
