@@ -1,25 +1,116 @@
 name: Build and Release Action
 
 on:
-  push:
-    tags:
-      - v*
+  pull_request:
+    types: [closed]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build:
+  tag-and-build-on-merge:
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@master
+        uses: actions/checkout@v4
         with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.base.ref }}
+
+      - name: Read package version
+        id: version
+        run: echo "version=$(node -p \"require('./package.json').version\")" >> "$GITHUB_OUTPUT"
+
+      - name: Check for existing tag
+        id: check_tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git fetch --tags
+          TAG="v${VERSION}"
+          echo "tag_name=${TAG}" >> "$GITHUB_OUTPUT"
+          if git tag -l "$TAG" | grep -q "^${TAG}$"; then
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: v${{ steps.version.outputs.version }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          if [ -z "$MERGE_SHA" ]; then
+            echo "Merge commit SHA is missing; exiting."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$MERGE_SHA" -m "Version $VERSION"
+          git push origin "$TAG"
+          echo "Created tag $TAG at $MERGE_SHA"
+
+      - name: Setup Node.js
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install NCC
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        run: npm install -g @vercel/ncc
+
+      - name: Install dependencies
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        run: npm install
+
+      - name: Remove old index.js
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        run: rm -fv action/index.js
+
+      - name: Build
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        run: npm run build
+
+      - name: Check for changes in
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        id: changes_check_merge
+        run: |
+          lines_changed=$(git status -s | wc --lines)
+          echo "has_changes=$lines_changed" >> $GITHUB_OUTPUT
+          echo "Lines changed: $lines_changed"
+
+      - name: Publish GitHub Action
+        if: steps.check_tag.outputs.tag_exists == 'false' && steps.changes_check_merge.outputs.has_changes != '0'
+        run: |
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          git add .
+          git commit -m "Auto-build GitHub Action" &&
+          git push origin main
+
+  build-on-tag-push:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
           ref: main
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: 20
 
@@ -36,14 +127,14 @@ jobs:
         run: npm run build
 
       - name: Check for changes in
-        id: changes_check
+        id: changes_check_tag
         run: |
           lines_changed=$(git status -s | wc --lines)
           echo "has_changes=$lines_changed" >> $GITHUB_OUTPUT
           echo "Lines changed: $lines_changed"
 
       - name: Publish GitHub Action
-        if: steps.changes_check.outputs.has_changes != '0'
+        if: steps.changes_check_tag.outputs.has_changes != '0'
         run: |
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
