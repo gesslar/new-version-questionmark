@@ -24,6 +24,16 @@ try {
     .split('\n')
     .filter(Boolean);
 
+  // TODO: figure out why we're only getting 1 tag
+  //    gesslar / new- version - questionmark@main
+  //    with:
+  //    source: package.json
+  //    version_pattern: v\d +\.\d +\.\d +
+  //
+  //      Tags: ["v1.0.2"]
+  //  Latest tag: "v1.0.2"
+  //  Current version: 1.0.3, Latest version: v1.0.2
+
   core.info(`Tags: ${JSON.stringify(tags)}`);
 
   // Use compare-versions to find the latest tag
