@@ -24,7 +24,7 @@ jobs:
 
       - name: Read package version
         id: version
-        run: echo "$(jq -r '.version' 'package.json')" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(jq -r '.version' 'package.json')" >> "$GITHUB_OUTPUT"
 
       - name: Check for existing tag
         id: check_tag
