@@ -4,7 +4,8 @@
   "description": "Automatic version difference detection action for GitHub ",
   "main": "index.js",
   "scripts": {
-    "build": "ncc build index.js -o action"
+    "build": "ncc build index.js -o action",
+    "go": "gh pr create --fill && gh pr -mrd --auto"
   },
   "keywords": [],
   "author": "gesslar",
