@@ -62,7 +62,7 @@ jobs:
 
       - name: Setup Node.js
         if: steps.check_tag.outputs.tag_exists == 'false'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
 
