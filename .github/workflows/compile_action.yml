@@ -95,7 +95,7 @@ jobs:
         run: |
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
-          git add .
+          git add . ':!package-lock.json'
           git commit -m "Auto-build GitHub Action" &&
           git push origin main
 
@@ -106,7 +106,7 @@ jobs:
           TAG: ${{ steps.create_push_tag.outputs.tag }}
         run: >
           gh release create "$TAG"
-            --title "Release $TAG"
-            --notes "This is an update that has been automatically built. For the
-            love of all that is holy, unholy, or morally grey, someone please take
-            the keyboard away from me. I'm going to run out of repo space soon."
+          --title "Release $TAG"
+          --notes "This is an update that has been automatically built. For the
+          love of all that is holy, unholy, or morally grey, someone please take
+          the keyboard away from me. I'm going to run out of repo space soon."
