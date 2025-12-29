@@ -1,11 +1,13 @@
 {
   "name": "new-version-questionmark",
-  "version": "1.3.21",
+  "version": "1.3.22",
   "description": "Automatic version difference detection action for GitHub ",
   "main": "index.js",
+  "type": "module",
   "scripts": {
-    "build": "ncc build index.js -o action",
+    "build": "ncc build src/index.js -o action",
     "update": "pnpm up -L",
+    "lint": "eslint src/",
     "go": "gh pr create --fill && gh pr -mrd --auto"
   },
   "packageManager": "pnpm@10.26.2",
@@ -14,6 +16,11 @@
   "license": "Unlicense",
   "dependencies": {
     "@actions/core": "^2.0.1",
+    "@gesslar/toolkit": "^3.0.1",
     "compare-versions": "^6.1.1"
+  },
+  "devDependencies": {
+    "@gesslar/uglier": "^0.0.9",
+    "eslint": "^9.39.2"
   }
 }
