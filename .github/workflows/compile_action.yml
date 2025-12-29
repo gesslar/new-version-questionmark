@@ -9,7 +9,121 @@ permissions:
   contents: write
 
 jobs:
+  ConfigureWorkflow:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      perform_testing: ${{ steps.cfg.outputs.perform_testing }}
+      perform_linting: ${{ steps.cfg.outputs.perform_linting }}
+      package_manager: ${{ steps.cfg.outputs.package_manager }}
+      pm_install_cmd: ${{ steps.cfg.outputs.pm_install_cmd }}
+
+    steps:
+      - name: Configure workflow
+        id: cfg
+        run: |+
+          ### PACKAGE MANAGER #################################################
+          #
+          # Set the package manager to use: 'npm' or 'pnpm'
+          # This will configure the appropriate setup and commands throughout
+          # the workflow.
+
+          PACKAGE_MANAGER="pnpm"
+          echo "package_manager=${PACKAGE_MANAGER}" >> "$GITHUB_OUTPUT"
+
+          # Set package manager specific commands and versions
+          if [ "$PACKAGE_MANAGER" = "pnpm" ]; then
+            echo "pm_install_cmd=pnpm install --frozen-lockfile" >> "$GITHUB_OUTPUT"
+          else
+            echo "pm_install_cmd=npm ci" >> "$GITHUB_OUTPUT"
+          fi
+
+          ### LINTING #########################################################
+          #
+          # If we need to perform linting, set the value to 'yes'. Any other
+          # value will skip linting.
+
+          echo "perform_linting=yes" >> "$GITHUB_OUTPUT"
+
+          ### TESTING #########################################################
+          #
+          # If we need to perform testing, set the value to 'yes'. Any other
+          # value will skip testing.
+
+          echo "perform_testing=no" >> "$GITHUB_OUTPUT"
+
+  Lint:
+    needs: ConfigureWorkflow
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    strategy:
+      matrix:
+        node-version: [22.x]
+
+    steps:
+      - name: Check out repository
+        if: ${{ needs.ConfigureWorkflow.outputs.perform_linting == 'yes' }}
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        if: ${{ needs.ConfigureWorkflow.outputs.perform_linting == 'yes' && needs.ConfigureWorkflow.outputs.package_manager == 'pnpm' }}
+        uses: pnpm/action-setup@v4
+
+      - name: Using Node v${{ matrix.node-version }}
+        if: ${{ needs.ConfigureWorkflow.outputs.perform_linting == 'yes' }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: ${{ needs.ConfigureWorkflow.outputs.package_manager }}
+
+      - name: Install dependencies
+        if: ${{ needs.ConfigureWorkflow.outputs.perform_linting == 'yes' }}
+        run: ${{ needs.ConfigureWorkflow.outputs.pm_install_cmd }}
+
+      - name: Perform lint check
+        if: ${{ needs.ConfigureWorkflow.outputs.perform_linting == 'yes' }}
+        run: ${{ needs.ConfigureWorkflow.outputs.package_manager }} run lint
+
+  Test:
+    needs: ConfigureWorkflow
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    strategy:
+      matrix:
+        node-version: [22.x]
+
+    steps:
+      - name: Check out repository
+        if: ${{ needs.ConfigureWorkflow.outputs.perform_testing == 'yes' }}
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        if: ${{ needs.ConfigureWorkflow.outputs.perform_testing == 'yes' && needs.ConfigureWorkflow.outputs.package_manager == 'pnpm' }}
+        uses: pnpm/action-setup@v4
+
+      - name: Using Node v${{ matrix.node-version }}
+        if: ${{ needs.ConfigureWorkflow.outputs.perform_testing == 'yes' }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: ${{ needs.ConfigureWorkflow.outputs.package_manager }}
+
+      - name: Install dependencies
+        if: ${{ needs.ConfigureWorkflow.outputs.perform_testing == 'yes' }}
+        run: ${{ needs.ConfigureWorkflow.outputs.pm_install_cmd }}
+
+      - name: Definitely don't cheat on tests
+        if: ${{ needs.ConfigureWorkflow.outputs.perform_testing == 'yes' }}
+        run: ${{ needs.ConfigureWorkflow.outputs.package_manager }} test
+
   tag-and-build-on-merge:
+    needs: [ConfigureWorkflow, "Lint", "Test"]
     if: github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     env:
@@ -21,6 +135,10 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.base.ref }}
+
+      - name: Install pnpm
+        if: ${{ needs.ConfigureWorkflow.outputs.perform_linting == 'yes' && needs.ConfigureWorkflow.outputs.package_manager == 'pnpm' }}
+        uses: pnpm/action-setup@v4
 
       - name: Read package version
         id: version
@@ -64,15 +182,16 @@ jobs:
         if: steps.check_tag.outputs.tag_exists == 'false'
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
+          cache: ${{ needs.ConfigureWorkflow.outputs.package_manager }}
 
       - name: Install NCC
         if: steps.check_tag.outputs.tag_exists == 'false'
-        run: npm install -g @vercel/ncc
+        run: ${{ needs.ConfigureWorkflow.outputs.package_manager }} install -g @vercel/ncc
 
       - name: Install dependencies
         if: steps.check_tag.outputs.tag_exists == 'false'
-        run: npm install
+        run: ${{ needs.ConfigureWorkflow.outputs.package_manager }} install
 
       - name: Remove old index.js
         if: steps.check_tag.outputs.tag_exists == 'false'
@@ -80,7 +199,7 @@ jobs:
 
       - name: Build
         if: steps.check_tag.outputs.tag_exists == 'false'
-        run: npm run build
+        run: ${{ needs.ConfigureWorkflow.outputs.package_manager }} run build
 
       - name: Check for changes in
         if: steps.check_tag.outputs.tag_exists == 'false'
