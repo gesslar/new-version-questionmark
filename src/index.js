@@ -13,12 +13,12 @@ void (async() => {
     const versionPattern = new RegExp(core.getInput("version_pattern") || "v\\d+\\.\\d+\\.\\d+")
 
     if(!await source.exists)
-      throw Sass.new(`No such file ${cwd.real.url}`)
+      throw Sass.new(`No such file ${source.real.url}`)
 
     // Determine current version
     let currentVersion
 
-    if(dataExt.includes(`${source.extension}`)) {
+    if(dataExt.includes(source.extension)) {
       const data = await source.loadData()
 
       currentVersion = data?.version
@@ -29,7 +29,7 @@ void (async() => {
     }
 
     if(!currentVersion)
-      throw Sass.new(`Unable to determine current version from ${cwd.real.url}`)
+      throw Sass.new(`Unable to determine current version from ${source.url}`)
 
     // Fetch Git tags and find the latest version
     const allTags = execSync("git fetch --tags && git tag")
@@ -44,11 +44,10 @@ void (async() => {
 
     // Use compare-versions to find the latest tag
     const latestTag = tags.reduce((latest, current) => {
-      const currentVer = current
       const latestVer = latest || null
 
       try {
-        return compareVersions.compare(currentVer, latestVer, ">") ? current : latest
+        return compareVersions.compare(current, latestVer, ">") ? current : latest
       } catch {
       // If comparison fails, fallback to the current latest
         return latest
@@ -56,7 +55,7 @@ void (async() => {
     }, "")
 
     core.info(`Latest tag: ${JSON.stringify(latestTag)}`)
-    const latestVersion = latestTag ? latestTag : null
+    const latestVersion = latestTag || null
 
     core.info(`Current version: '${currentVersion}', Latest version: '${latestVersion}'`)
 
