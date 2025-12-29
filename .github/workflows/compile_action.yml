@@ -100,16 +100,13 @@ jobs:
           git push origin main
 
       - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
+        if: steps.check_tag.outputs.tag_exists == 'false'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Use the default token
-        with:
-          tag_name: ${{ steps.create_push_tag.outputs.tag }}
-          release_name: Release ${{ steps.create_push_tag.outputs.tag }}
-          body: |
-            This is an update that has been automatically built. For the love
-            of all that is holy, unholy, or morally grey, someone please take
-            the keyboard away from me. I'm going to run out of repo space soon.
-          draft: false
-          prerelease: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.create_push_tag.outputs.tag }}
+        run: >
+          gh release create "$TAG"
+            --title "Release $TAG"
+            --notes "This is an update that has been automatically built. For the
+            love of all that is holy, unholy, or morally grey, someone please take
+            the keyboard away from me. I'm going to run out of repo space soon."
