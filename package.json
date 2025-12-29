@@ -5,13 +5,15 @@
   "main": "index.js",
   "scripts": {
     "build": "ncc build index.js -o action",
+    "update": "pnpm up -L",
     "go": "gh pr create --fill && gh pr -mrd --auto"
   },
+  "packageManager": "pnpm@10.26.2",
   "keywords": [],
   "author": "gesslar",
   "license": "Unlicense",
   "dependencies": {
-    "@actions/core": "^1.11.1",
+    "@actions/core": "^2.0.1",
     "compare-versions": "^6.1.1"
   }
 }
