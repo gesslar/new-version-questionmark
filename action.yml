@@ -16,5 +16,5 @@ outputs:
   updated_version:
     description: "The updated version string or 'no changes'."
 runs:
-  using: "node20"
+  using: "node24"
   main: "action/index.js"
