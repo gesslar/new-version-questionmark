@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@gesslar/uglier": "^2.4.0",
+    "@vercel/ncc": "^0.38.4",
     "eslint": "^10.1.0"
   }
 }
