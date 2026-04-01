@@ -70,7 +70,7 @@ jobs:
 
       - name: Install pnpm
         if: ${{ needs.ConfigureWorkflow.outputs.perform_linting == 'yes' && needs.ConfigureWorkflow.outputs.package_manager == 'pnpm' }}
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5
 
       - name: Using Node v${{ matrix.node-version }}
         if: ${{ needs.ConfigureWorkflow.outputs.perform_linting == 'yes' }}
@@ -105,7 +105,7 @@ jobs:
 
       - name: Install pnpm
         if: ${{ needs.ConfigureWorkflow.outputs.perform_testing == 'yes' && needs.ConfigureWorkflow.outputs.package_manager == 'pnpm' }}
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5
 
       - name: Using Node v${{ matrix.node-version }}
         if: ${{ needs.ConfigureWorkflow.outputs.perform_testing == 'yes' }}
@@ -138,7 +138,7 @@ jobs:
 
       - name: Install pnpm
         if: ${{ needs.ConfigureWorkflow.outputs.perform_linting == 'yes' && needs.ConfigureWorkflow.outputs.package_manager == 'pnpm' }}
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5
 
       - name: Read package version
         id: version
