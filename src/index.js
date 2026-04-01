@@ -1,5 +1,5 @@
-import core from "@actions/core"
-import {CappedDirectoryObject, Data, Sass} from "@gesslar/toolkit"
+import * as core from "@actions/core"
+import {DirectoryObject, Data, Sass} from "@gesslar/toolkit"
 import compareVersions from "compare-versions"
 import {execSync} from "node:child_process"
 
@@ -8,7 +8,7 @@ const dataExt = [".json",".json5",".jsonc",".yaml",".yml"]
 void (async() => {
   try {
     // Get inputs
-    const cwd = new CappedDirectoryObject(".")
+    const cwd = new DirectoryObject(".")
     const source = cwd.getFile(core.getInput("source") || "package.json")
     const versionPattern = new RegExp(core.getInput("version_pattern") || "v\\d+\\.\\d+\\.\\d+")
 
