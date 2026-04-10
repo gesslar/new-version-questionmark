@@ -52,7 +52,7 @@ npm run build  # bundles to action/index.js
 ```
 ## License
 
-`new-version-questionmark` is released into the public domain under the [Unlicense](UNLICENSE.txt).
+`new-version-questionmark` is released under the [0BSD](LICENSE.txt).
 
 This package includes or depends on third-party components under their own
 licenses:
@@ -60,5 +60,5 @@ licenses:
 | Dependency | License |
 | --- | --- |
 | [@actions/core](https://github.com/actions/toolkit) | MIT |
-| [@gesslar/toolkit](https://github.com/gesslar/toolkit) | Unlicense |
+| [@gesslar/toolkit](https://github.com/gesslar/toolkit) | 0BSD |
 | [compare-versions](https://github.com/omichelsen/compare-versions) | MIT |

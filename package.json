@@ -15,15 +15,15 @@
   },
   "keywords": [],
   "author": "gesslar",
-  "license": "Unlicense",
+  "license": "0BSD",
   "dependencies": {
     "@actions/core": "^3.0.0",
-    "@gesslar/toolkit": "^4.4.0",
+    "@gesslar/toolkit": "^5.0.1",
     "compare-versions": "^6.1.1"
   },
   "devDependencies": {
     "@gesslar/uglier": "^2.4.0",
     "@vercel/ncc": "^0.38.4",
-    "eslint": "^10.1.0"
+    "eslint": "^10.2.0"
   }
 }
