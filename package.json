@@ -11,7 +11,6 @@
     "update": "npx npm-check-updates -u && npm install",
     "version": "npm run build && git add action",
     "lint": "eslint src/",
-    "go": "gh pr create --fill && gh pr -mrd --auto",
     "patch": "npm version patch",
     "minor": "npm version minor",
     "major": "npm version major"
