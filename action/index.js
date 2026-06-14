@@ -30090,8 +30090,10 @@ class Composer {
             }
         }
         if (afterDoc) {
-            Array.prototype.push.apply(doc.errors, this.errors);
-            Array.prototype.push.apply(doc.warnings, this.warnings);
+            for (let i = 0; i < this.errors.length; ++i)
+                doc.errors.push(this.errors[i]);
+            for (let i = 0; i < this.warnings.length; ++i)
+                doc.warnings.push(this.warnings[i]);
         }
         else {
             doc.errors = this.errors;
@@ -31017,7 +31019,7 @@ function doubleQuotedValue(source, onError) {
                     next = source[++i + 1];
             }
             else if (next === 'x' || next === 'u' || next === 'U') {
-                const length = { x: 2, u: 4, U: 8 }[next];
+                const length = next === 'x' ? 2 : next === 'u' ? 4 : 8;
                 res += parseCharCode(source, i + 1, length, onError);
                 i += length;
             }
@@ -31087,12 +31089,14 @@ function parseCharCode(source, offset, length, onError) {
     const cc = source.substr(offset, length);
     const ok = cc.length === length && /^[0-9a-fA-F]+$/.test(cc);
     const code = ok ? parseInt(cc, 16) : NaN;
-    if (isNaN(code)) {
+    try {
+        return String.fromCodePoint(code);
+    }
+    catch {
         const raw = source.substr(offset - 2, length + 2);
         onError(offset - 2, 'BAD_DQ_ESCAPE', `Invalid escape sequence ${raw}`);
         return raw;
     }
-    return String.fromCodePoint(code);
 }
 
 exports.resolveFlowScalar = resolveFlowScalar;
@@ -32330,6 +32334,8 @@ class Alias extends Node.NodeBase {
      * instance of the `source` anchor before this node.
      */
     resolve(doc, ctx) {
+        if (ctx?.maxAliasCount === 0)
+            throw new ReferenceError('Alias resolution is disabled');
         let nodes;
         if (ctx?.aliasResolveCache) {
             nodes = ctx.aliasResolveCache;
@@ -34003,7 +34009,7 @@ class Lexer {
             const n = (yield* this.pushCount(1)) + (yield* this.pushSpaces(true));
             this.indentNext = this.indentValue + 1;
             this.indentValue += n;
-            return yield* this.parseBlockStart();
+            return 'block-start';
         }
         return 'doc';
     }
@@ -34324,32 +34330,36 @@ class Lexer {
         return 0;
     }
     *pushIndicators() {
-        switch (this.charAt(0)) {
-            case '!':
-                return ((yield* this.pushTag()) +
-                    (yield* this.pushSpaces(true)) +
-                    (yield* this.pushIndicators()));
-            case '&':
-                return ((yield* this.pushUntil(isNotAnchorChar)) +
-                    (yield* this.pushSpaces(true)) +
-                    (yield* this.pushIndicators()));
-            case '-': // this is an error
-            case '?': // this is an error outside flow collections
-            case ':': {
-                const inFlow = this.flowLevel > 0;
-                const ch1 = this.charAt(1);
-                if (isEmpty(ch1) || (inFlow && flowIndicatorChars.has(ch1))) {
-                    if (!inFlow)
-                        this.indentNext = this.indentValue + 1;
-                    else if (this.flowKey)
-                        this.flowKey = false;
-                    return ((yield* this.pushCount(1)) +
-                        (yield* this.pushSpaces(true)) +
-                        (yield* this.pushIndicators()));
+        let n = 0;
+        loop: while (true) {
+            switch (this.charAt(0)) {
+                case '!':
+                    n += yield* this.pushTag();
+                    n += yield* this.pushSpaces(true);
+                    continue loop;
+                case '&':
+                    n += yield* this.pushUntil(isNotAnchorChar);
+                    n += yield* this.pushSpaces(true);
+                    continue loop;
+                case '-': // this is an error
+                case '?': // this is an error outside flow collections
+                case ':': {
+                    const inFlow = this.flowLevel > 0;
+                    const ch1 = this.charAt(1);
+                    if (isEmpty(ch1) || (inFlow && flowIndicatorChars.has(ch1))) {
+                        if (!inFlow)
+                            this.indentNext = this.indentValue + 1;
+                        else if (this.flowKey)
+                            this.flowKey = false;
+                        n += yield* this.pushCount(1);
+                        n += yield* this.pushSpaces(true);
+                        continue loop;
+                    }
                 }
             }
+            break loop;
         }
-        return 0;
+        return n;
     }
     *pushTag() {
         if (this.charAt(1) === '<') {
@@ -34535,6 +34545,14 @@ function getFirstKeyStartProps(prev) {
     }
     return prev.splice(i, prev.length);
 }
+function arrayPushArray(target, source) {
+    // May exhaust call stack with large `source` array
+    if (source.length < 1e5)
+        Array.prototype.push.apply(target, source);
+    else
+        for (let i = 0; i < source.length; ++i)
+            target.push(source[i]);
+}
 function fixFlowSeqItems(fc) {
     if (fc.start.type === 'flow-seq-start') {
         for (const it of fc.items) {
@@ -34547,12 +34565,12 @@ function fixFlowSeqItems(fc) {
                 delete it.key;
                 if (isFlowToken(it.value)) {
                     if (it.value.end)
-                        Array.prototype.push.apply(it.value.end, it.sep);
+                        arrayPushArray(it.value.end, it.sep);
                     else
                         it.value.end = it.sep;
                 }
                 else
-                    Array.prototype.push.apply(it.start, it.sep);
+                    arrayPushArray(it.start, it.sep);
                 delete it.sep;
             }
         }
@@ -34972,7 +34990,7 @@ class Parser {
                         const prev = map.items[map.items.length - 2];
                         const end = prev?.value?.end;
                         if (Array.isArray(end)) {
-                            Array.prototype.push.apply(end, it.start);
+                            arrayPushArray(end, it.start);
                             end.push(this.sourceToken);
                             map.items.pop();
                             return;
@@ -35187,7 +35205,7 @@ class Parser {
                         const prev = seq.items[seq.items.length - 2];
                         const end = prev?.value?.end;
                         if (Array.isArray(end)) {
-                            Array.prototype.push.apply(end, it.start);
+                            arrayPushArray(end, it.start);
                             end.push(this.sourceToken);
                             seq.items.pop();
                             return;
@@ -36324,18 +36342,18 @@ const isMergeKey = (ctx, key) => (merge.identify(key) ||
         merge.identify(key.value))) &&
     ctx?.doc.schema.tags.some(tag => tag.tag === merge.tag && tag.default);
 function addMergeToJSMap(ctx, map, value) {
-    value = ctx && identity.isAlias(value) ? value.resolve(ctx.doc) : value;
-    if (identity.isSeq(value))
-        for (const it of value.items)
+    const source = resolveAliasValue(ctx, value);
+    if (identity.isSeq(source))
+        for (const it of source.items)
             mergeValue(ctx, map, it);
-    else if (Array.isArray(value))
-        for (const it of value)
+    else if (Array.isArray(source))
+        for (const it of source)
             mergeValue(ctx, map, it);
     else
-        mergeValue(ctx, map, value);
+        mergeValue(ctx, map, source);
 }
 function mergeValue(ctx, map, value) {
-    const source = ctx && identity.isAlias(value) ? value.resolve(ctx.doc) : value;
+    const source = resolveAliasValue(ctx, value);
     if (!identity.isMap(source))
         throw new Error('Merge sources must be maps or map aliases');
     const srcMap = source.toJSON(null, ctx, Map);
@@ -36357,6 +36375,9 @@ function mergeValue(ctx, map, value) {
         }
     }
     return map;
+}
+function resolveAliasValue(ctx, value) {
+    return ctx && identity.isAlias(value) ? value.resolve(ctx.doc, ctx) : value;
 }
 
 exports.addMergeToJSMap = addMergeToJSMap;
@@ -37401,7 +37422,8 @@ function stringifyNumber({ format, minFractionDigits, tag, value }) {
     if (!format &&
         minFractionDigits &&
         (!tag || tag === 'tag:yaml.org,2002:float') &&
-        /^\d/.test(n)) {
+        /^-?\d/.test(n) &&
+        !n.includes('e')) {
         let i = n.indexOf('.');
         if (i < 0) {
             i = n.length;
@@ -41312,10 +41334,10 @@ function convertResets() {
 /* harmony export */   A: () => (/* binding */ Collection)
 /* harmony export */ });
 /* harmony import */ var _Data_js__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(5497);
-/* harmony import */ var _Valid_js__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(4319);
-/* harmony import */ var _Sass_js__WEBPACK_IMPORTED_MODULE_2__ = __nccwpck_require__(5295);
+/* harmony import */ var _Sass_js__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(5295);
+/* harmony import */ var _TypeSpec_js__WEBPACK_IMPORTED_MODULE_2__ = __nccwpck_require__(5978);
 /* harmony import */ var _Util_js__WEBPACK_IMPORTED_MODULE_3__ = __nccwpck_require__(8245);
-/* harmony import */ var _TypeSpec_js__WEBPACK_IMPORTED_MODULE_4__ = __nccwpck_require__(5978);
+/* harmony import */ var _Valid_js__WEBPACK_IMPORTED_MODULE_4__ = __nccwpck_require__(4319);
 /**
  * @file Collection.js
  *
@@ -41349,8 +41371,8 @@ class Collection {
     const req = "Array"
     const type = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(collection)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(collection, req, `Invalid collection. Expected '${req}, got ${type}`)
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(predicate, "Function",
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(collection, req, `Invalid collection. Expected '${req}, got ${type}`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(predicate, "Function",
       `Invalid predicate, expected 'Function', got ${_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(predicate)}`)
 
     const work = forward
@@ -41378,8 +41400,8 @@ class Collection {
     const req = "Object"
     const type = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(collection)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(collection, req, `Invalid collection. Expected '${req}, got ${type}`)
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(predicate, "Function",
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(collection, req, `Invalid collection. Expected '${req}, got ${type}`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(predicate, "Function",
       `Invalid predicate, expected 'Function', got ${_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(predicate)}`)
 
     const work = Object.entries(collection)
@@ -41405,8 +41427,8 @@ class Collection {
     const req = "Set"
     const type = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(collection)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(collection, req, `Invalid collection. Expected '${req}, got ${type}`)
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(predicate, "Function",
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(collection, req, `Invalid collection. Expected '${req}, got ${type}`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(predicate, "Function",
       `Invalid predicate, expected 'Function', got ${_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(predicate)}`)
 
     const work = Array.from(collection)
@@ -41433,8 +41455,8 @@ class Collection {
     const req = "Map"
     const type = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(collection)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(collection, req, `Invalid collection. Expected '${req}, got ${type}`)
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(predicate, "Function",
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(collection, req, `Invalid collection. Expected '${req}, got ${type}`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(predicate, "Function",
       `Invalid predicate, expected 'Function', got ${_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(predicate)}`)
 
     const work = forward
@@ -41505,8 +41527,8 @@ class Collection {
     const req = "Array"
     const type = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(array)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(array, req, `Invalid array. Expected '${req}', got '${type}'`)
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(asyncFn, "Function",
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(array, req, `Invalid array. Expected '${req}', got '${type}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(asyncFn, "Function",
       `Invalid mapper function, expected 'Function', got '${_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(asyncFn)}'`)
 
     const results = []
@@ -41531,16 +41553,16 @@ class Collection {
     const req = "Array"
     const arrType = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(arr)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(arr, req, `Invalid array. Expected '${req}', got '${arrType}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(arr, req, `Invalid array. Expected '${req}', got '${arrType}'`)
 
     // Validate type parameter if provided
     if(type !== undefined)
-      _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(type, "string", `Invalid type parameter. Expected 'string', got '${_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(type)}'`)
+      _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(type, "string", `Invalid type parameter. Expected 'string', got '${_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(type)}'`)
 
     const checkType = type ? _Util_js__WEBPACK_IMPORTED_MODULE_3__/* ["default"] */ .A.capitalize(type) : _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(arr[0])
 
     if(options?.strict === false) {
-      const ts = new _TypeSpec_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A(checkType)
+      const ts = new _TypeSpec_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A(checkType)
 
       return arr.every(e =>  ts.matches(e))
     }
@@ -41558,7 +41580,7 @@ class Collection {
     const req = "Array"
     const arrType = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(arr)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(arr, req, `Invalid array. Expected '${req}', got '${arrType}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(arr, req, `Invalid array. Expected '${req}', got '${arrType}'`)
 
     return arr.filter((item, index, self) => self.indexOf(item) === index)
   }
@@ -41575,8 +41597,8 @@ class Collection {
     const arr1Type = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(arr1)
     const arr2Type = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(arr2)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(arr1, req, `Invalid first array. Expected '${req}', got '${arr1Type}'`)
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(arr2, req, `Invalid second array. Expected '${req}', got '${arr2Type}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(arr1, req, `Invalid first array. Expected '${req}', got '${arr1Type}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(arr2, req, `Invalid second array. Expected '${req}', got '${arr2Type}'`)
 
     const [short,long] = [arr1,arr2].sort((a,b) => a.length - b.length)
 
@@ -41603,8 +41625,8 @@ class Collection {
     const arr1Type = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(arr1)
     const arr2Type = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(arr2)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(arr1, req, `Invalid first array. Expected '${req}', got '${arr1Type}'`)
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(arr2, req, `Invalid second array. Expected '${req}', got '${arr2Type}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(arr1, req, `Invalid first array. Expected '${req}', got '${arr1Type}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(arr2, req, `Invalid second array. Expected '${req}', got '${arr2Type}'`)
 
     const [short,long] = [arr1,arr2].sort((a,b) => a.length - b.length)
 
@@ -41625,9 +41647,9 @@ class Collection {
     const req = "Array"
     const arrType = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(arr)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(arr, req, `Invalid array. Expected '${req}', got '${arrType}'`)
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(length, "Number", `Invalid length. Expected 'Number', got '${_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(length)}'`)
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(position, "Number", `Invalid position. Expected 'Number', got '${_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(position)}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(arr, req, `Invalid array. Expected '${req}', got '${arrType}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(length, "Number", `Invalid length. Expected 'Number', got '${_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(length)}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(position, "Number", `Invalid position. Expected 'Number', got '${_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(position)}'`)
 
     const diff = length - arr.length
 
@@ -41643,7 +41665,7 @@ class Collection {
     // append
       return arr.concat(padding) // somewhere in the middle - THAT IS ILLEGAL
     else
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A.new("Invalid position")
+      throw _Sass_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.new("Invalid position")
   }
 
   /**
@@ -41658,8 +41680,8 @@ class Collection {
     const req = "Array"
     const arrType = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(arr)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(arr, req, `Invalid array. Expected '${req}', got '${arrType}'`)
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(predicate, "Function",
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(arr, req, `Invalid array. Expected '${req}', got '${arrType}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(predicate, "Function",
       `Invalid predicate function, expected 'Function', got '${_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(predicate)}'`)
 
     const results = await Promise.all(arr.map(predicate))
@@ -41705,7 +41727,7 @@ class Collection {
     const req = "Object"
     const objType = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(obj)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(obj, req, `Invalid object. Expected '${req}', got '${objType}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(obj, req, `Invalid object. Expected '${req}', got '${objType}'`)
 
     return Object.keys(obj).length === 0
   }
@@ -41724,13 +41746,13 @@ class Collection {
     const keysReq = "Array"
     const keysType = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(keys)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(obj, req, `Invalid object. Expected '${req}', got '${objType}'`)
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(keys, keysReq, `Invalid keys array. Expected '${keysReq}', got '${keysType}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(obj, req, `Invalid object. Expected '${req}', got '${objType}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(keys, keysReq, `Invalid keys array. Expected '${keysReq}', got '${keysType}'`)
 
     let current = obj  // a moving reference to internal objects within obj
     const len = keys.length
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.prototypePollutionProtection(keys)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.prototypePollutionProtection(keys)
 
     for(let i = 0; i < len; i++) {
       const elem = keys[i]
@@ -41759,13 +41781,13 @@ class Collection {
     const keysReq = "Array"
     const keysType = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(keys)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(obj, req, `Invalid object. Expected '${req}', got '${objType}'`)
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(keys, keysReq, `Invalid keys array. Expected '${keysReq}', got '${keysType}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(obj, req, `Invalid object. Expected '${req}', got '${objType}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(keys, keysReq, `Invalid keys array. Expected '${keysReq}', got '${keysType}'`)
 
     const nested = Collection.assureObjectPath(obj, keys.slice(0, -1))
     const finalKey = keys[keys.length-1]
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.prototypePollutionProtection([finalKey])
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.prototypePollutionProtection([finalKey])
 
     nested[finalKey] = value
   }
@@ -41831,9 +41853,9 @@ class Collection {
    * @returns {Promise<object>} The mapped object
    */
   static async mapObject(original, transformer, mutate = false) {
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(original, "object", {allowEmpty: true})
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(transformer, "function")
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(mutate, "boolean")
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(original, "object", {allowEmpty: true})
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(transformer, "function")
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(mutate, "boolean")
 
     const result = mutate ? original : {}
 
@@ -41858,7 +41880,7 @@ class Collection {
       result = {}
 
     if(!_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.isType(source, "Array", {allowEmpty: false}))
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A.new("Source must be an array.")
+      throw _Sass_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.new("Source must be an array.")
 
     workSource.push(...source)
 
@@ -41866,13 +41888,13 @@ class Collection {
       !_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.isType(spec, "Array", {allowEmpty: false}) &&
       !_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.isType(spec, "Function")
     )
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A.new("Spec must be an array or a function.")
+      throw _Sass_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.new("Spec must be an array or a function.")
 
     if(_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.isType(spec, "Function")) {
       const specResult = await spec(workSource)
 
       if(!_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.isType(specResult, "Array"))
-        throw _Sass_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A.new("Spec resulting from function must be an array.")
+        throw _Sass_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.new("Spec resulting from function must be an array.")
 
       workSpec.push(...specResult)
     } else if(_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.isType(spec, "Array", {allowEmpty: false})) {
@@ -41880,14 +41902,14 @@ class Collection {
     }
 
     if(workSource.length !== workSpec.length)
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A.new("Source and spec must have the same number of elements.")
+      throw _Sass_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.new("Source and spec must have the same number of elements.")
 
     // Objects must always be indexed by strings.
     workSource.map((element, index, arr) => (arr[index] = String(element)))
 
     // Check that all keys are strings
     if(!Collection.isArrayUniform(workSource, "String"))
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A.new("Indices of an Object must be of type string.")
+      throw _Sass_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.new("Indices of an Object must be of type string.")
 
     workSource.forEach((element, index) => (result[element] = workSpec[index]))
 
@@ -41904,8 +41926,8 @@ class Collection {
    * @throws {Sass} If arr is not an Array or except is not an Array
    */
   static trimArray(arr, except=[]) {
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(arr, "Array")
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(except, "Array")
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(arr, "Array")
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(except, "Array")
 
     Collection.trimArrayLeft(arr, except)
     Collection.trimArrayRight(arr, except)
@@ -41923,8 +41945,8 @@ class Collection {
    * @throws {Sass} If arr is not an Array or except is not an Array
    */
   static trimArrayRight(arr, except=[]) {
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(arr, "Array")
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(except, "Array")
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(arr, "Array")
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(except, "Array")
 
     arr.reverse()
     Collection.trimArrayLeft(arr, except)
@@ -41943,8 +41965,8 @@ class Collection {
    * @throws {Sass} If arr is not an Array or except is not an Array
    */
   static trimArrayLeft(arr, except=[]) {
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(arr, "Array")
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(except, "Array")
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(arr, "Array")
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(except, "Array")
 
     while(arr.length > 0) {
       const value = arr[0]
@@ -41970,15 +41992,15 @@ class Collection {
     const req = "Array"
     const type = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(objects)
 
-    _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.type(objects, req, `Invalid objects array. Expected '${req}', got '${type}'`)
+    _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(objects, req, `Invalid objects array. Expected '${req}', got '${type}'`)
 
     return objects.reduce((acc, curr) => {
       const elemType = _Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.typeOf(curr)
 
       if(!_Data_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.isPlainObject(curr))
-        throw _Sass_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A.new(`Invalid array element. Expected plain object, got '${elemType}'`)
+        throw _Sass_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.new(`Invalid array element. Expected plain object, got '${elemType}'`)
 
-      _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.prototypePollutionProtection(Object.keys(curr))
+      _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.prototypePollutionProtection(Object.keys(curr))
 
       Object.entries(curr).forEach(([key, value]) => {
         if(!acc[key])
@@ -42025,7 +42047,7 @@ class Collection {
     const changed = {}
 
     for(const key of Object.keys(updated)) {
-      _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.prototypePollutionProtection([key])
+      _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.prototypePollutionProtection([key])
 
       if(!Object.hasOwn(original, key)) {
         added[key] = updated[key]
@@ -42051,7 +42073,7 @@ class Collection {
     }
 
     for(const key of Object.keys(original)) {
-      _Valid_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.prototypePollutionProtection([key])
+      _Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.prototypePollutionProtection([key])
 
       if(!Object.hasOwn(updated, key))
         removed[key] = original[key]
@@ -42946,17 +42968,15 @@ class Sass extends Error {
       )
     }
 
-    if(this.cause) {
+    if(this.cause && nerdMode) {
       if(typeof this.cause.report === "function") {
-        if(nerdMode) {
-          console.error(
-            "\n" +
-            `[error] Caused By`
-          )
-        }
+        console.error(
+          "\n" +
+          `[error] Caused By`
+        )
 
         this.cause.report(nerdMode, true)
-      } else if(nerdMode && this.cause.stack) {
+      } else if(this.cause.stack) {
         console.error()
         console.group()
         console.error(
@@ -43471,7 +43491,7 @@ class TypeSpec {
       // Handle non-array values
       if(!isArray && !allowedArray) {
         if(valueType === allowedType)
-          return allowEmpty || !empty
+          return _Data_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.isBaseType(value, allowedType) && (allowEmpty || !empty)
 
         if(valueType === "Null" || valueType === "Undefined")
           return false
@@ -43808,26 +43828,38 @@ class Util {
       _Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.type(supplied, "String", {allowEmpty: false})
       _Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.type(target, "String", {allowEmpty: false})
 
-      const suppliedSemver = supplied.split(".").filter(Boolean).map(Number).filter(e => !isNaN(e))
-      const targetSemver = target.split(".").filter(Boolean).map(Number).filter(e => !isNaN(e))
+      const {major: sMajor, minor: sMinor, patch: sPatch} =
+        this.semver.basic.exec(supplied)?.groups ?? {}
+      const {major: tMajor, minor: tMinor, patch: tPatch} =
+        this.semver.basic.exec(target)?.groups ?? {}
 
-      _Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.assert(suppliedSemver.length === 3, "Invalid format for supplied semver.")
-      _Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.assert(targetSemver.length === 3, "Invalid format for target semver.")
+      _Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.assert(Boolean(sMajor && sMinor && sPatch), "Invalid format for supplied semver.")
+      _Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.assert(Boolean(tMajor && tMinor && tPatch), "Invalid format for target semver.")
 
-      if(suppliedSemver[0] < targetSemver[0])
+      const isMajor = Number(sMajor)
+      const itMajor = Number(tMajor)
+      if(isMajor < itMajor)
         return false
 
-      if(suppliedSemver[0] === targetSemver[0]) {
-        if(suppliedSemver[1] < targetSemver[1])
+      if(isMajor === itMajor) {
+        const isMinor = Number(sMinor)
+        const itMinor = Number(tMinor)
+        if(isMinor < itMinor)
           return false
 
-        if(suppliedSemver[1] === targetSemver[1])
-          if(suppliedSemver[2] < targetSemver[2])
+        if(isMinor === itMinor) {
+          const isPatch = Number(sPatch)
+          const itPatch = Number(tPatch)
+          if(isPatch < itPatch)
             return false
+        }
       }
 
       return true
-    }
+    },
+
+    basic: /^(?<major>0|(?:[1-9]\d*))\.(?<minor>0|(?:[1-9]\d*))\.(?<patch>0|(?:[1-9]\d*))$/,
+    enhanced: /^(?<major>0|(?:[1-9]\d*))\.(?<minor>0|(?:[1-9]\d*))\.(?<patch>0|(?:[1-9]\d*))(?:-(?<prerelease>(?:0|(?:[1-9A-Za-z-][0-9A-Za-z-]*))(?:\.(?:0|(?:[1-9A-Za-z-][0-9A-Za-z-]*)))*))?(?:\+(?<build>(?:0|(?:[1-9A-Za-z-][0-9A-Za-z-]*))(?:\.(?:0|(?:[1-9A-Za-z-][0-9A-Za-z-]*)))*))?$/
   }
 }
 
@@ -43855,20 +43887,35 @@ class Util {
 
 
 /**
+ * Options for type validation methods.
+ *
+ * @typedef {object} TypeValidationOptions
+ * @property {boolean} [allowEmpty=true] - Whether empty values are allowed
+ */
+
+/**
  * Validation utility class providing type checking and assertion methods.
  */
 class Valid {
+  /** @type {typeof Sass} */
+  static _Sass = _Sass_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A
+
   /**
    * Validates a value against a type. Uses Data.isType.
    *
    * @param {unknown} value - The value to validate
    * @param {string} type - The expected type in the form of "object", "object[]", "object|object[]"
-   * @param {object} [options] - Additional options for validation.
+   * @param {TypeValidationOptions} [options] - Additional options for validation.
    */
   static type(value, type, options) {
-    Valid.assert(
+    const expected = [type]
+
+    if(options?.allowEmpty !== true)
+      expected.push("[no empty values]")
+
+    this.assert(
       _Data_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.isType(value, type, options),
-      `Invalid type. Expected ${type}, got ${_Data_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.typeOf(value)}`
+      `Invalid type. Expected ${expected.join(" ")}, got ${_Data_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.typeOf(value)}`
     )
   }
 
@@ -43882,23 +43929,20 @@ class Valid {
    *                         met (optional)
    */
   static assert(condition, message, arg = null) {
-    if(!_Data_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.isType(condition, "boolean")) {
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.new(`Condition must be a boolean, got ${condition}`)
-    }
+    if(!_Data_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.isType(condition, "boolean"))
+      throw this._Sass.new(`Condition must be a boolean, got ${condition}`)
 
-    if(!_Data_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.isType(message, "string")) {
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.new(`Message must be a string, got ${message}`)
-    }
+    if(!_Data_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.isType(message, "string"))
+      throw this._Sass.new(`Message must be a string, got ${message}`)
 
-    if(!(arg === null || arg === undefined || typeof arg === "number")) {
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.new(`Arg must be a number, got ${arg}`)
-    }
+    if(!(arg === null || arg === undefined || typeof arg === "number"))
+      throw this._Sass.new(`Arg must be a number, got ${arg}`)
 
     if(!condition)
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.new(`${message}${arg ? `: ${arg}` : ""}`)
+      throw this._Sass.new(`${message}${arg ? `: ${arg}` : ""}`)
   }
 
-  static #restrictedProto = ["__proto__", "constructor", "prototype"]
+  static #restrictedProto = Object.freeze(["__proto__", "constructor", "prototype"])
 
   /**
    * Protects against prototype pollution by checking keys for dangerous property names.
@@ -43908,11 +43952,13 @@ class Valid {
    * @throws {Sass} If any key matches restricted prototype properties (__proto__, constructor, prototype)
    */
   static prototypePollutionProtection(keys) {
-    Valid.type(keys, "String[]")
+    this.type(keys, "String[]")
 
-    const oopsIDidItAgain = _Collection_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A.intersection(this.#restrictedProto, keys)
+    const oopsIDidItAgain = _Collection_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A.intersection(
+      Valid.#restrictedProto, keys
+    )
 
-    Valid.assert(
+    this.assert(
       oopsIDidItAgain.length === 0,
       `We don't pee in your pool, don't pollute ours with your ${String(oopsIDidItAgain)}`
     )
@@ -43990,7 +44036,7 @@ __webpack_async_result__();
 /* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
 /* harmony export */   A: () => (/* binding */ Cache)
 /* harmony export */ });
-/* harmony import */ var _browser_lib_Valid_js__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(4319);
+/* harmony import */ var _Valid_js__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(1293);
 /* harmony import */ var _Data_js__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(4988);
 /* harmony import */ var _Sass_js__WEBPACK_IMPORTED_MODULE_2__ = __nccwpck_require__(4057);
 
@@ -44051,7 +44097,7 @@ class Cache {
    * @throws {Sass} If the file does not exist
    */
   async #loadFromCache(fileObject, kind, options={}) {
-    _browser_lib_Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.assert(kind === "raw" || kind === "structured",
+    _Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.assert(kind === "raw" || kind === "structured",
       "Cache data type must be 'raw' or 'structured'.")
 
     const lastModified = await fileObject.modified()
@@ -44103,7 +44149,7 @@ class Cache {
    * @throws {Sass} If the file cannot be found or accessed
    */
   async loadDataFromCache(fileObject, options={}) {
-    _browser_lib_Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.type(fileObject, "FileObject")
+    _Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.type(fileObject, "FileObject")
 
     return await this.#loadFromCache(
       fileObject, "structured", options)
@@ -44118,7 +44164,7 @@ class Cache {
    * @throws {Sass} If the file cannot be found or accessed
    */
   async loadFromCache(fileObject, options={}) {
-    _browser_lib_Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.type(fileObject, "FileObject")
+    _Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.type(fileObject, "FileObject")
 
     return await this.#loadFromCache(
       fileObject, "raw", options)
@@ -44130,7 +44176,7 @@ class Cache {
    * @param {import("./FileObject.js").default} file - The file object to clear from cache
    */
   resetCache(file) {
-    _browser_lib_Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.type(file, "FileObject")
+    _Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.type(file, "FileObject")
 
     this.#cleanup(file)
   }
@@ -44281,6 +44327,7 @@ var __webpack_async_dependencies__ = __webpack_handle_async_dependencies__([_Fil
  * @property {boolean} isDirectory - Always true
  * @property {DirectoryObject|null} parent - The parent directory (null if root)
  * @property {Promise<boolean>} exists - Whether the directory exists (async getter)
+ * @property {Promise<("none"|"symbolic"|null)>} linkType - The link kind at this path (async)
  *
  * @example
  * // Basic usage
@@ -44448,6 +44495,28 @@ class DirectoryObject extends _FileSystem_js__WEBPACK_IMPORTED_MODULE_6__/* ["de
   }
 
   /**
+   * Reports the link kind at this path. Reads the filesystem on every
+   * access, like {@link DirectoryObject#exists}, and throws under the
+   * same conditions: if the path exists but is not a directory (broken
+   * symlink, symlink to a non-directory, or a regular file), this throws
+   * a {@link Sass} error rather than returning a misleading value.
+   *
+   * - `"symbolic"` - a symlink whose target is a directory that exists
+   * - `"none"` - a regular directory
+   * - `null` - the path does not exist at all
+   *
+   * Hard links are not reported for directories: most filesystems do not
+   * allow hard-linked directories at all, and `nlink` on a directory is
+   * not a usable signal (it counts `.` and each subdirectory's `..`).
+   *
+   * @returns {Promise<"none"|"symbolic"|null>} The link kind
+   * @throws {Sass} If the path exists but does not resolve to a directory
+   */
+  get linkType() {
+    return this.#directoryLinkType()
+  }
+
+  /**
    * Return the path as passed to the constructor.
    *
    * @returns {string} The directory path
@@ -44564,16 +44633,58 @@ class DirectoryObject extends _FileSystem_js__WEBPACK_IMPORTED_MODULE_6__/* ["de
    * Check if a directory exists
    *
    * @returns {Promise<boolean>} Whether the directory exists
+   * @throws {Sass} If the path exists but is not a directory
    */
   async #directoryExists() {
-    const path = this.path
-
     try {
-      (await (0,node_fs_promises__WEBPACK_IMPORTED_MODULE_0__.opendir)(path)).close()
+      const stats = await (0,node_fs_promises__WEBPACK_IMPORTED_MODULE_0__.stat)(this.path).catch(error => error.code === "ENOENT" ? null : error)
+
+      if(stats instanceof Error)
+        throw stats
+
+      if(stats === null)
+        return false
+
+      if(!stats.isDirectory())
+        throw _Sass_js__WEBPACK_IMPORTED_MODULE_7__/* ["default"] */ .A.new(`Path exists but is not a directory: '${this.path}'`)
 
       return true
-    } catch {
-      return false
+    } catch(error) {
+      throw _Sass_js__WEBPACK_IMPORTED_MODULE_7__/* ["default"] */ .A.new(`Determining status of '${this.path}'`, error)
+    }
+  }
+
+  /**
+   * Resolves the link kind at this path.
+   *
+   * @private
+   * @returns {Promise<"none"|"symbolic"|null>} The link kind
+   */
+  async #directoryLinkType() {
+    try {
+      const linkStats = await (0,node_fs_promises__WEBPACK_IMPORTED_MODULE_0__.lstat)(this.path).catch(error => error.code === "ENOENT" ? null : error)
+
+      if(linkStats instanceof Error)
+        throw linkStats
+
+      if(linkStats === null)
+        return null
+
+      if(linkStats.isSymbolicLink()) {
+        const targetStats = await (0,node_fs_promises__WEBPACK_IMPORTED_MODULE_0__.stat)(this.path)
+
+        if(!targetStats.isDirectory())
+          throw _Sass_js__WEBPACK_IMPORTED_MODULE_7__/* ["default"] */ .A.new(`Path exists but is not a directory: '${this.path}'`)
+
+        return "symbolic"
+      }
+
+      if(!linkStats.isDirectory())
+        throw _Sass_js__WEBPACK_IMPORTED_MODULE_7__/* ["default"] */ .A.new(`Path exists but is not a directory: '${this.path}'`)
+
+      return "none"
+    } catch(error) {
+      throw _Sass_js__WEBPACK_IMPORTED_MODULE_7__/* ["default"] */ .A.new(`Determining link type of '${this.path}'`, error)
     }
   }
 
@@ -44582,8 +44693,8 @@ class DirectoryObject extends _FileSystem_js__WEBPACK_IMPORTED_MODULE_6__/* ["de
    *
    * Returns FileObject and DirectoryObject instances. Symbolic links are
    * resolved to their target type: links to files appear in `files`, links
-   * to directories appear in `directories`. Broken symlinks propagate the
-   * stat error to the caller.
+   * to directories appear in `directories`. Broken symlinks (where the
+   * target does not exist) appear in `files` so they can be unlinked.
    *
    * @async
    * @param {string} [pat=""] - Optional glob pattern to filter results (e.g., "*.txt", "test-*")
@@ -44629,8 +44740,8 @@ class DirectoryObject extends _FileSystem_js__WEBPACK_IMPORTED_MODULE_6__/* ["de
    *
    * Returns FileObject and DirectoryObject instances. Symbolic links are
    * resolved to their target type: links to files appear in `files`, links
-   * to directories appear in `directories`. Broken symlinks propagate the
-   * stat error to the caller.
+   * to directories appear in `directories`. Broken symlinks (where the
+   * target does not exist) appear in `files` so they can be unlinked.
    *
    * @async
    * @param {string} [pat=""] - Glob pattern to filter results
@@ -44665,7 +44776,8 @@ class DirectoryObject extends _FileSystem_js__WEBPACK_IMPORTED_MODULE_6__/* ["de
   /**
    * Categorizes an array of Dirent objects into files and directories.
    * Resolves symbolic links to their target type via `fs.stat()`. Broken
-   * symlinks propagate the stat error to the caller.
+   * symlinks (where the target does not exist) are categorized as files
+   * so they can be unlinked.
    *
    * @private
    * @param {Array<import("node:fs").Dirent>} dirents - Directory entries to categorize
@@ -44685,12 +44797,19 @@ class DirectoryObject extends _FileSystem_js__WEBPACK_IMPORTED_MODULE_6__/* ["de
       } else if(dirent.isDirectory()) {
         result.directories.push(new this.constructor(fullPath))
       } else if(dirent.isSymbolicLink()) {
-        const stats = await (0,node_fs_promises__WEBPACK_IMPORTED_MODULE_0__.stat)(fullPath)
+        try {
+          const stats = await (0,node_fs_promises__WEBPACK_IMPORTED_MODULE_0__.stat)(fullPath)
 
-        if(stats.isFile())
-          result.files.push(new _FileObject_js__WEBPACK_IMPORTED_MODULE_5__/* ["default"] */ .A(fullPath, this))
-        else if(stats.isDirectory())
-          result.directories.push(new this.constructor(fullPath))
+          if(stats.isFile())
+            result.files.push(new _FileObject_js__WEBPACK_IMPORTED_MODULE_5__/* ["default"] */ .A(fullPath, this))
+          else if(stats.isDirectory())
+            result.directories.push(new this.constructor(fullPath))
+        } catch(error) {
+          if(error.code === "ENOENT")
+            result.files.push(new _FileObject_js__WEBPACK_IMPORTED_MODULE_5__/* ["default"] */ .A(fullPath, this))
+          else
+            throw error
+        }
       }
     }
 
@@ -44805,9 +44924,9 @@ class DirectoryObject extends _FileSystem_js__WEBPACK_IMPORTED_MODULE_6__/* ["de
    * @returns {Promise<boolean>} True if the file exists, false otherwise
    */
   async hasFile(filename) {
-    const file = new _FileObject_js__WEBPACK_IMPORTED_MODULE_5__/* ["default"] */ .A(filename, this)
+    const file = this.getFile(filename)
 
-    return await file.exists
+    return await file.exists.catch(() => false)
   }
 
   /**
@@ -44817,10 +44936,9 @@ class DirectoryObject extends _FileSystem_js__WEBPACK_IMPORTED_MODULE_6__/* ["de
    * @returns {Promise<boolean>} True if the directory exists, false otherwise
    */
   async hasDirectory(dirname) {
-    const dir = _FileSystem_js__WEBPACK_IMPORTED_MODULE_6__/* ["default"] */ .A.resolvePath(this.path, dirname)
-    const directory = new DirectoryObject(dir)
+    const dir = this.getDirectory(dirname)
 
-    return await directory.exists
+    return await dir.exists.catch(() => false)
   }
 
   /**
@@ -44975,6 +45093,7 @@ var __webpack_async_dependencies__ = __webpack_handle_async_dependencies__([_Dir
  * @property {boolean} isFile - Always true for files
  * @property {DirectoryObject} parent - The parent directory object
  * @property {Promise<boolean>} exists - Whether the file exists (async)
+ * @property {Promise<("none"|"symbolic"|"broken"|"hard"|null)>} linkType - The link kind at this path (async)
  */
 
 class FileObject extends _FileSystem_js__WEBPACK_IMPORTED_MODULE_7__/* ["default"] */ .A {
@@ -45147,6 +45266,24 @@ class FileObject extends _FileSystem_js__WEBPACK_IMPORTED_MODULE_7__/* ["default
   }
 
   /**
+   * Reports the link kind at this path. Reads the filesystem on every
+   * access, like {@link FileObject#exists}.
+   *
+   * - `"symbolic"` - a symlink whose target exists
+   * - `"broken"` - a symlink whose target does not exist
+   * - `"hard"` - a regular file with additional hard links (`nlink > 1`).
+   *   Hard links are inode-level and indistinguishable from each other,
+   *   so this only reports that *some* other entry shares the inode.
+   * - `"none"` - a regular file with no links
+   * - `null` - the path does not exist
+   *
+   * @returns {Promise<"none"|"symbolic"|"broken"|"hard"|null>} The link kind
+   */
+  get linkType() {
+    return this.#fileLinkType()
+  }
+
+  /**
    * Return the normalized path that was provided to the constructor.
    *
    * @returns {string} The sanitized user-supplied file path
@@ -45270,14 +45407,65 @@ class FileObject extends _FileSystem_js__WEBPACK_IMPORTED_MODULE_7__/* ["default
    * Check if a file exists
    *
    * @returns {Promise<boolean>} Whether the file exists
+   * @throws {Sass} If the path exists but is not a file
    */
   async #fileExists() {
     try {
-      await node_fs_promises__WEBPACK_IMPORTED_MODULE_1__.access(this.path, node_fs_promises__WEBPACK_IMPORTED_MODULE_1__.constants.F_OK)
+      const stats = await node_fs_promises__WEBPACK_IMPORTED_MODULE_1__.lstat(this.path).catch(error => error.code === "ENOENT" ? null : error)
+
+      if(stats instanceof Error)
+        throw stats
+
+      if(stats === null)
+        return false
+
+      if(!stats.isFile() && !stats.isSymbolicLink())
+        throw _Sass_js__WEBPACK_IMPORTED_MODULE_8__/* ["default"] */ .A.new(`Path exists but is not a file: '${this.path}'`)
 
       return true
-    } catch {
-      return false
+    } catch(error) {
+      throw _Sass_js__WEBPACK_IMPORTED_MODULE_8__/* ["default"] */ .A.new(`Determining status of '${this.path}'`, error)
+    }
+  }
+
+  /**
+   * Resolves the link kind at this path.
+   *
+   * @private
+   * @returns {Promise<"none"|"symbolic"|"broken"|"hard"|null>} The link kind
+   */
+  async #fileLinkType() {
+    try {
+      const stats = await node_fs_promises__WEBPACK_IMPORTED_MODULE_1__.lstat(this.path).catch(error => error.code === "ENOENT" ? null : error)
+
+      if(stats instanceof Error)
+        throw stats
+
+      if(stats === null)
+        return null
+
+      if(stats.isSymbolicLink()) {
+        try {
+          await node_fs_promises__WEBPACK_IMPORTED_MODULE_1__.stat(this.path)
+
+          return "symbolic"
+        } catch(error) {
+          if(error.code === "ENOENT")
+            return "broken"
+
+          throw error
+        }
+      }
+
+      if(!stats.isFile())
+        throw _Sass_js__WEBPACK_IMPORTED_MODULE_8__/* ["default"] */ .A.new(`Path exists but is not a file: '${this.path}'`)
+
+      if(stats.nlink > 1)
+        return "hard"
+
+      return "none"
+    } catch(error) {
+      throw _Sass_js__WEBPACK_IMPORTED_MODULE_8__/* ["default"] */ .A.new(`Determining link type of '${this.path}'`, error)
     }
   }
 
@@ -45759,7 +45947,7 @@ class FileSystem {
       localOptions,
       {
         onChange: onChange ?? (() => {
-          ;(0,_Glog_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .Ay)(`${this} changed somehow.`)
+          ;(0,_Glog_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A)(`${this} changed somehow.`)
         })
       }
     ))
@@ -46391,13 +46579,13 @@ __webpack_async_result__();
 
 // EXPORTS
 __nccwpck_require__.d(__webpack_exports__, {
-  Ay: () => (/* binding */ lib_Glog)
+  A: () => (/* binding */ lib_Glog)
 });
-
-// UNUSED EXPORTS: logSymbols, loggerColours
 
 ;// CONCATENATED MODULE: external "node:module"
 const external_node_module_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:module");
+// EXTERNAL MODULE: external "node:util"
+var external_node_util_ = __nccwpck_require__(7975);
 // EXTERNAL MODULE: ./node_modules/@gesslar/colours/src/Colours.js
 var Colours = __nccwpck_require__(5272);
 // EXTERNAL MODULE: ./node_modules/@gesslar/toolkit/src/browser/lib/Data.js
@@ -46427,6 +46615,27 @@ var Util = __nccwpck_require__(8245);
 
 
 
+
+
+/**
+ * Apply `@gesslar/colours` formatting, then defer to Term for colour support.
+ *
+ * The colour template must always be evaluated so that `@gesslar/colours`
+ * format tokens (e.g. `{F019}`) are resolved out of the text. When Term reports
+ * that the terminal lacks colour support, the resulting ANSI escape sequences
+ * are stripped so only plain text remains.
+ *
+ * @param {Array<string>} strings - Template strings.
+ * @param {...unknown} values - Template values.
+ * @returns {string} Formatted text, with ANSI stripped when colour is unsupported.
+ */
+function paint(strings, ...values) {
+  const formatted = (0,Colours/* default */.A)(strings, ...values)
+
+  return Term/* default */.A.hasColor
+    ? formatted
+    : (0,external_node_util_.stripVTControlCharacters)(formatted)
+}
 
 // Auto-detect VS Code extension environment
 let vscodeApi = null
@@ -46956,13 +47165,13 @@ class Glog {
       const colourCode = colours[level][debugLevel] || colours[level][0]
 
       return useStrings
-        ? (0,Colours/* default */.A)`${namePrefix}${colourCode}${tag}{/}: ${message}`
-        : (0,Colours/* default */.A)`${namePrefix}${colourCode}${tag}{/} ${message}`
+        ? paint`${namePrefix}${colourCode}${tag}{/}: ${message}`
+        : paint`${namePrefix}${colourCode}${tag}{/} ${message}`
     }
 
     return useStrings
-      ? (0,Colours/* default */.A)`${namePrefix}${colours[level]}${tag}{/}: ${message}`
-      : (0,Colours/* default */.A)`${namePrefix}${colours[level]}${tag}{/} ${message}`
+      ? paint`${namePrefix}${colours[level]}${tag}{/}: ${message}`
+      : paint`${namePrefix}${colours[level]}${tag}{/} ${message}`
   }
 
   /**
@@ -47116,7 +47325,7 @@ class Glog {
    * @example logger.colourize`{success}Operation completed{/} in {bold}${time}ms{/}`
    */
   colourize(strings, ...values) {
-    const message = (0,Colours/* default */.A)(strings, ...values)
+    const message = paint(strings, ...values)
     const name = this.#name || Glog.name || "Log"
 
     Term/* default */.A.log(`[${name}] ${message}`)
@@ -47129,7 +47338,7 @@ class Glog {
    * @param {...unknown} values - Template values
    */
   static colourize(strings, ...values) {
-    const message = (0,Colours/* default */.A)(strings, ...values)
+    const message = paint(strings, ...values)
     const name = this.name || "Log"
 
     Term/* default */.A.log(`[${name}] ${message}`)
@@ -47159,8 +47368,8 @@ class Glog {
     const tag = useStrings ? "Success" : symbols.success
     const colourCode = colours.success || "{F046}"
     const formatted = useStrings
-      ? (0,Colours/* default */.A)`[${name}] ${colourCode}${tag}{/}: ${message}`
-      : (0,Colours/* default */.A)`[${name}] ${colourCode}${tag}{/} ${message}`
+      ? paint`[${name}] ${colourCode}${tag}{/}: ${message}`
+      : paint`[${name}] ${colourCode}${tag}{/} ${message}`
 
     Term/* default */.A.log(formatted, ...args)
   }
@@ -47198,8 +47407,8 @@ class Glog {
     const tag = useStrings ? "Debug" : symbols.debug
     const colourCode = colours.debug[level] || colours.debug[0]
     const label = useStrings
-      ? (0,Colours/* default */.A)`[${name}] ${colourCode}${tag}{/}: ${message}`
-      : (0,Colours/* default */.A)`[${name}] ${colourCode}${tag}{/} ${message}`
+      ? paint`[${name}] ${colourCode}${tag}{/}: ${message}`
+      : paint`[${name}] ${colourCode}${tag}{/} ${message}`
 
     Term/* default */.A.group(label)
   }
@@ -47216,8 +47425,8 @@ class Glog {
     const symbols = this.symbols || logSymbols
     const tag = useStrings ? "Info" : symbols.info
     const label = useStrings
-      ? (0,Colours/* default */.A)`[${name}] ${colours.info}${tag}{/}: ${message}`
-      : (0,Colours/* default */.A)`[${name}] ${colours.info}${tag}{/} ${message}`
+      ? paint`[${name}] ${colours.info}${tag}{/}: ${message}`
+      : paint`[${name}] ${colours.info}${tag}{/} ${message}`
 
     Term/* default */.A.group(label)
   }
@@ -47233,8 +47442,8 @@ class Glog {
     const symbols = this.symbols || logSymbols
     const tag = useStrings ? "Success" : symbols.success
     const label = useStrings
-      ? (0,Colours/* default */.A)`[${name}] {success}${tag}{/}: ${message}`
-      : (0,Colours/* default */.A)`[${name}] {success}${tag}{/} ${message}`
+      ? paint`[${name}] {success}${tag}{/}: ${message}`
+      : paint`[${name}] {success}${tag}{/} ${message}`
 
     Term/* default */.A.group(label)
   }
@@ -47292,8 +47501,8 @@ class Glog {
     const tag = useStrings ? "Success" : symbols.success
     const namePrefix = showName ? `[${name}] ` : ""
     const label = useStrings
-      ? (0,Colours/* default */.A)`${namePrefix}{success}${tag}{/}: ${message}`
-      : (0,Colours/* default */.A)`${namePrefix}{success}${tag}{/} ${message}`
+      ? paint`${namePrefix}{success}${tag}{/}: ${message}`
+      : paint`${namePrefix}{success}${tag}{/} ${message}`
 
     Term/* default */.A.group(label)
   }
@@ -47321,7 +47530,7 @@ class Glog {
     }
 
     if(label) {
-      Term/* default */.A.log((0,Colours/* default */.A)`[${this.#name || Glog.name || "Log"}] {info}Table{/}: ${label}`)
+      Term/* default */.A.log(paint`[${this.#name || Glog.name || "Log"}] {info}Table{/}: ${label}`)
     }
 
     Term/* default */.A.table(data, tableOptions)
@@ -47350,7 +47559,7 @@ class Glog {
     }
 
     if(label) {
-      Term/* default */.A.log((0,Colours/* default */.A)`[${this.name || "Log"}] {info}Table{/}: ${label}`)
+      Term/* default */.A.log(paint`[${this.name || "Log"}] {info}Table{/}: ${label}`)
     }
 
     Term/* default */.A.table(data, tableOptions)
@@ -47647,17 +47856,15 @@ class Sass extends _browser_lib_Sass_js__WEBPACK_IMPORTED_MODULE_0__/* ["default
       )
     }
 
-    if(this.cause) {
+    if(this.cause && nerdMode) {
       if(typeof this.cause.report === "function") {
-        if(nerdMode) {
-          _Term_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.error(
-            "\n" +
-            `${_Term_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.terminalBracket(["error", "Caused By"])}`
-          )
-        }
+        _Term_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.error(
+          "\n" +
+          `${_Term_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.terminalBracket(["error", "Caused By"])}`
+        )
 
         this.cause.report(nerdMode, true)
-      } else if(nerdMode && this.cause.stack) {
+      } else if(this.cause.stack) {
         _Term_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.error()
         _Term_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.group()
         _Term_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.error(
@@ -48084,12 +48291,27 @@ class Term {
   /**
    * Whether the terminal supports color output.
    *
+   * Honours the `NO_COLOR` convention (https://no-color.org): when `NO_COLOR`
+   * is present and not an empty string, colour is disabled. `FORCE_COLOR` takes
+   * precedence over `NO_COLOR` (matching Node/`supports-color`). `supports-color`
+   * itself does not implement `NO_COLOR`, so the check lives here.
+   *
    * @type {boolean}
    */
   static get hasColor() {
-    return this.#cache.has("hasColor")
-      ? this.#cache.get("hasColor")
-      : this.#cache.set("hasColor", Boolean(supports_color.stdout)).get("hasColor")
+    if(this.#cache.has("hasColor"))
+      return this.#cache.get("hasColor")
+
+    const forced = "FORCE_COLOR" in external_node_process_.env
+    const noColor = !forced
+      && typeof external_node_process_.env.NO_COLOR === "string"
+      && external_node_process_.env.NO_COLOR.length > 0
+
+    const supported = noColor
+      ? false
+      : Boolean(supports_color.stdout)
+
+    return this.#cache.set("hasColor", supported).get("hasColor")
   }
 
   /**
@@ -49010,94 +49232,25 @@ class Util extends _browser_lib_Util_js__WEBPACK_IMPORTED_MODULE_2__/* ["default
 /* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
 /* harmony export */   A: () => (/* binding */ Valid)
 /* harmony export */ });
-/* harmony import */ var _Sass_js__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(4057);
-/* harmony import */ var _browser_lib_Data_js__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(5497);
-/* harmony import */ var _browser_lib_Collection_js__WEBPACK_IMPORTED_MODULE_2__ = __nccwpck_require__(9465);
+/* harmony import */ var _browser_lib_Valid_js__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(4319);
+/* harmony import */ var _Sass_js__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(4057);
 /**
  * @file Valid.js
  *
  * Node-flavoured validation utilities that throw the Node Sass error type.
- * Mirrors the browser Valid API so browser and Node callers behave the same.
+ * Extends the browser Valid, swapping in the Node Sass for richer reporting.
  */
 
 
 
-
-
-/**
- * Options for type validation methods.
- *
- * @typedef {object} TypeValidationOptions
- * @property {boolean} [allowEmpty=true] - Whether empty values are allowed
- */
 
 /**
  * Validation utility class providing type checking and assertion methods.
+ * Inherits all behaviour from browser Valid; only the Sass class differs.
  */
-class Valid {
-  static #restrictedProto = ["__proto__", "constructor", "prototype"]
-
-  /**
-   * Validates a value against a type. Uses Data.isType.
-   *
-   * @param {unknown} value - The value to validate
-   * @param {string} type - The expected type in the form of "object", "object[]", "object|object[]"
-   * @param {TypeValidationOptions} [options] - Additional options for validation.
-   */
-  static type(value, type, options) {
-    const expected = [type]
-
-    if(options?.allowEmpty !== true)
-      expected.push("[no empty values]")
-
-    Valid.assert(
-      _browser_lib_Data_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.isType(value, type, options),
-      `Invalid type. Expected ${expected.join(" ")}, got ${_browser_lib_Data_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.typeOf(value)}`
-    )
-  }
-
-  /**
-   * Asserts a condition
-   *
-   * @param {boolean} condition - The condition to assert
-   * @param {string} message - The message to display if the condition is not
-   *                           met
-   * @param {number} [arg] - The argument to display if the condition is not
-   *                         met (optional)
-   */
-  static assert(condition, message, arg = null) {
-    if(!_browser_lib_Data_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.isType(condition, "boolean"))
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.new(`Condition must be a boolean, got ${condition}`)
-
-    if(!_browser_lib_Data_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A.isType(message, "string"))
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.new(`Message must be a string, got ${message}`)
-
-    if(!(arg === null || arg === undefined || typeof arg === "number"))
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.new(`Arg must be a number, got ${arg}`)
-
-    if(!condition)
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A.new(`${message}${arg ? `: ${arg}` : ""}`)
-  }
-
-  /**
-   * Protects against prototype pollution by checking keys for dangerous
-   * property names.
-   *
-   * Throws if any restricted prototype properties are found in the keys array.
-   *
-   * @param {Array<string>} keys - Array of property keys to validate
-   * @throws {Sass} If any key matches restricted prototype properties (__proto__, constructor, prototype)
-   */
-  static prototypePollutionProtection(keys) {
-    Valid.type(keys, "String[]")
-
-    const oopsIDidItAgain = _browser_lib_Collection_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A.intersection(this.#restrictedProto, keys)
-
-    Valid.assert(
-      oopsIDidItAgain.length === 0,
-      `We don't pee in your pool, don't pollute ours with your ${String(oopsIDidItAgain)}`
-    )
-  }
+class Valid extends _browser_lib_Valid_js__WEBPACK_IMPORTED_MODULE_0__/* ["default"] */ .A {
+  /** @type {typeof Sass} */
+  static _Sass = _Sass_js__WEBPACK_IMPORTED_MODULE_1__/* ["default"] */ .A
 }
 
 
@@ -49168,7 +49321,8 @@ class Watcher {
     this.#abortController = new AbortController()
 
     for(const target of targets) {
-      const watcher = (0,node_fs_promises__WEBPACK_IMPORTED_MODULE_0__.watch)(target.url, {
+      const watchPath = await (0,node_fs_promises__WEBPACK_IMPORTED_MODULE_0__.realpath)(target.path).catch(() => target.path)
+      const watcher = (0,node_fs_promises__WEBPACK_IMPORTED_MODULE_0__.watch)(watchPath, {
         recursive: target.isDirectory ? recursive : false,
         persistent,
         signal: this.#abortController.signal,

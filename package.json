@@ -1,14 +1,16 @@
 {
   "name": "new-version-questionmark",
-  "version": "1.6.2",
+  "version": "1.7.0",
   "description": "Automatic version difference detection action for GitHub.",
-  "main": "index.js",
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "build": "ncc build src/index.js -o action",
     "update": "npx npm-check-updates -u && npm install",
+    "version": "npm run build && git add action",
     "lint": "eslint src/",
-    "go": "gh pr create --fill && gh pr -mrd --auto",
     "patch": "npm version patch",
     "minor": "npm version minor",
     "major": "npm version major"
@@ -17,13 +19,13 @@
   "author": "gesslar",
   "license": "0BSD",
   "dependencies": {
-    "@actions/core": "^3.0.0",
-    "@gesslar/toolkit": "^5.0.1",
+    "@actions/core": "^3.0.1",
+    "@gesslar/toolkit": "^5.5.2",
     "compare-versions": "^6.1.1"
   },
   "devDependencies": {
-    "@gesslar/uglier": "^2.4.0",
-    "@vercel/ncc": "^0.38.4",
-    "eslint": "^10.2.0"
+    "@gesslar/uglier": "^2.4.1",
+    "@vercel/ncc": "^0.44.0",
+    "eslint": "^10.5.0"
   }
 }
