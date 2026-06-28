@@ -1,6 +1,6 @@
 {
   "name": "new-version-questionmark",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Automatic version difference detection action for GitHub.",
   "type": "module",
   "engines": {
