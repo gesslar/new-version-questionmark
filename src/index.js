@@ -13,7 +13,7 @@ void (async() => {
     const versionPattern = new RegExp(core.getInput("version_pattern") || "v\\d+\\.\\d+\\.\\d+")
 
     if(!await source.exists)
-      throw Sass.new(`No such file ${source.real.url}`)
+      throw Sass.new(`No such file ${source.url}`)
 
     // Determine current version
     let currentVersion

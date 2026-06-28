@@ -6076,8 +6076,6 @@ function defaultFactory (origin, opts) {
 
 class Agent extends DispatcherBase {
   constructor ({ factory = defaultFactory, maxRedirections = 0, connect, ...options } = {}) {
-    super()
-
     if (typeof factory !== 'function') {
       throw new InvalidArgumentError('factory must be a function.')
     }
@@ -6089,6 +6087,8 @@ class Agent extends DispatcherBase {
     if (!Number.isInteger(maxRedirections) || maxRedirections < 0) {
       throw new InvalidArgumentError('maxRedirections must be a positive number')
     }
+
+    super(options)
 
     if (connect && typeof connect !== 'function') {
       connect = { ...connect }
@@ -6461,6 +6461,9 @@ const EMPTY_BUF = Buffer.alloc(0)
 const FastBuffer = Buffer[Symbol.species]
 const addListener = util.addListener
 const removeAllListeners = util.removeAllListeners
+const kIdleSocketValidation = Symbol('kIdleSocketValidation')
+const kIdleSocketValidationTimeout = Symbol('kIdleSocketValidationTimeout')
+const kSocketUsed = Symbol('kSocketUsed')
 
 let extractBody
 
@@ -6683,27 +6686,69 @@ class Parser {
 
       const offset = llhttp.llhttp_get_error_pos(this.ptr) - currentBufferPtr
 
-      if (ret === constants.ERROR.PAUSED_UPGRADE) {
-        this.onUpgrade(data.slice(offset))
-      } else if (ret === constants.ERROR.PAUSED) {
-        this.paused = true
-        socket.unshift(data.slice(offset))
-      } else if (ret !== constants.ERROR.OK) {
-        const ptr = llhttp.llhttp_get_error_reason(this.ptr)
-        let message = ''
-        /* istanbul ignore else: difficult to make a test case for */
-        if (ptr) {
-          const len = new Uint8Array(llhttp.memory.buffer, ptr).indexOf(0)
-          message =
-            'Response does not match the HTTP/1.1 protocol (' +
-            Buffer.from(llhttp.memory.buffer, ptr, len).toString() +
-            ')'
+      if (ret !== constants.ERROR.OK) {
+        const body = data.subarray(offset)
+
+        if (ret === constants.ERROR.PAUSED_UPGRADE) {
+          this.onUpgrade(body)
+        } else if (ret === constants.ERROR.PAUSED) {
+          this.paused = true
+          socket.unshift(body)
+        } else {
+          throw this.createError(ret, body)
         }
-        throw new HTTPParserError(message, constants.ERROR[ret], data.slice(offset))
       }
     } catch (err) {
       util.destroy(socket, err)
     }
+  }
+
+  finish () {
+    assert(currentParser === null)
+    assert(this.ptr != null)
+    assert(!this.paused)
+
+    const { llhttp } = this
+
+    let ret
+
+    try {
+      currentParser = this
+      ret = llhttp.llhttp_finish(this.ptr)
+    } finally {
+      currentParser = null
+    }
+
+    if (ret === constants.ERROR.OK) {
+      return null
+    }
+
+    if (ret === constants.ERROR.PAUSED || ret === constants.ERROR.PAUSED_UPGRADE) {
+      this.paused = true
+      return null
+    }
+
+    return this.createError(ret, EMPTY_BUF)
+  }
+
+  createError (ret, data) {
+    const { llhttp, contentLength, bytesRead } = this
+
+    if (contentLength && bytesRead !== parseInt(contentLength, 10)) {
+      return new ResponseContentLengthMismatchError()
+    }
+
+    const ptr = llhttp.llhttp_get_error_reason(this.ptr)
+    let message = ''
+    if (ptr) {
+      const len = new Uint8Array(llhttp.memory.buffer, ptr).indexOf(0)
+      message =
+        'Response does not match the HTTP/1.1 protocol (' +
+        Buffer.from(llhttp.memory.buffer, ptr, len).toString() +
+        ')'
+    }
+
+    return new HTTPParserError(message, constants.ERROR[ret], data)
   }
 
   destroy () {
@@ -6730,6 +6775,11 @@ class Parser {
 
     /* istanbul ignore next: difficult to make a test case for */
     if (socket.destroyed) {
+      return -1
+    }
+
+    if (client[kRunning] === 0) {
+      util.destroy(socket, new SocketError('bad response', util.getSocketInfo(socket)))
       return -1
     }
 
@@ -6833,6 +6883,11 @@ class Parser {
 
     /* istanbul ignore next: difficult to make a test case for */
     if (socket.destroyed) {
+      return -1
+    }
+
+    if (client[kRunning] === 0) {
+      util.destroy(socket, new SocketError('bad response', util.getSocketInfo(socket)))
       return -1
     }
 
@@ -7009,6 +7064,7 @@ class Parser {
     request.onComplete(headers)
 
     client[kQueue][client[kRunningIdx]++] = null
+    socket[kSocketUsed] = true
 
     if (socket[kWriting]) {
       assert(client[kRunning] === 0)
@@ -7067,6 +7123,9 @@ async function connectH1 (client, socket) {
   socket[kWriting] = false
   socket[kReset] = false
   socket[kBlocking] = false
+  socket[kIdleSocketValidation] = 0
+  socket[kIdleSocketValidationTimeout] = null
+  socket[kSocketUsed] = false
   socket[kParser] = new Parser(client, socket, llhttpInstance)
 
   addListener(socket, 'error', function (err) {
@@ -7077,8 +7136,11 @@ async function connectH1 (client, socket) {
     // On Mac OS, we get an ECONNRESET even if there is a full body to be forwarded
     // to the user.
     if (err.code === 'ECONNRESET' && parser.statusCode && !parser.shouldKeepAlive) {
-      // We treat all incoming data so for as a valid response.
-      parser.onMessageComplete()
+      const parserErr = parser.finish()
+      if (parserErr) {
+        this[kError] = parserErr
+        this[kClient][kOnError](parserErr)
+      }
       return
     }
 
@@ -7097,8 +7159,10 @@ async function connectH1 (client, socket) {
     const parser = this[kParser]
 
     if (parser.statusCode && !parser.shouldKeepAlive) {
-      // We treat all incoming data so far as a valid response.
-      parser.onMessageComplete()
+      const parserErr = parser.finish()
+      if (parserErr) {
+        util.destroy(this, parserErr)
+      }
       return
     }
 
@@ -7108,10 +7172,11 @@ async function connectH1 (client, socket) {
     const client = this[kClient]
     const parser = this[kParser]
 
+    clearIdleSocketValidation(this)
+
     if (parser) {
       if (!this[kError] && parser.statusCode && !parser.shouldKeepAlive) {
-        // We treat all incoming data so far as a valid response.
-        parser.onMessageComplete()
+        this[kError] = parser.finish() || this[kError]
       }
 
       this[kParser].destroy()
@@ -7174,7 +7239,7 @@ async function connectH1 (client, socket) {
       return socket.destroyed
     },
     busy (request) {
-      if (socket[kWriting] || socket[kReset] || socket[kBlocking]) {
+      if (socket[kWriting] || socket[kReset] || socket[kBlocking] || socket[kIdleSocketValidation] === 1) {
         return true
       }
 
@@ -7212,6 +7277,31 @@ async function connectH1 (client, socket) {
   }
 }
 
+function clearIdleSocketValidation (socket) {
+  if (socket[kIdleSocketValidationTimeout]) {
+    clearTimeout(socket[kIdleSocketValidationTimeout])
+    socket[kIdleSocketValidationTimeout] = null
+  }
+
+  socket[kIdleSocketValidation] = 0
+}
+
+function scheduleIdleSocketValidation (client, socket) {
+  socket[kIdleSocketValidation] = 1
+  socket[kIdleSocketValidationTimeout] = setTimeout(() => {
+    socket[kIdleSocketValidationTimeout] = null
+    socket[kIdleSocketValidation] = 2
+
+    if (client[kSocket] === socket && !socket.destroyed) {
+      client[kResume]()
+    }
+  }, 0)
+  socket[kIdleSocketValidationTimeout].unref?.()
+}
+
+/**
+ * @param {import('./client.js')} client
+ */
 function resumeH1 (client) {
   const socket = client[kSocket]
 
@@ -7224,6 +7314,32 @@ function resumeH1 (client) {
     } else if (socket[kNoRef] && socket.ref) {
       socket.ref()
       socket[kNoRef] = false
+    }
+
+    if (client[kRunning] === 0 && client[kPending] > 0 && socket[kSocketUsed]) {
+      if (socket[kIdleSocketValidation] === 0) {
+        scheduleIdleSocketValidation(client, socket)
+        socket[kParser].readMore()
+        if (socket.destroyed) {
+          return
+        }
+        return
+      }
+
+      if (socket[kIdleSocketValidation] === 1) {
+        socket[kParser].readMore()
+        if (socket.destroyed) {
+          return
+        }
+        return
+      }
+    }
+
+    if (client[kRunning] === 0) {
+      socket[kParser].readMore()
+      if (socket.destroyed) {
+        return
+      }
     }
 
     if (client[kSize] === 0) {
@@ -7319,6 +7435,7 @@ function writeH1 (client, request) {
   }
 
   const socket = client[kSocket]
+  clearIdleSocketValidation(socket)
 
   const abort = (err) => {
     if (request.aborted || request.completed) {
@@ -8638,9 +8755,10 @@ class Client extends DispatcherBase {
     autoSelectFamilyAttemptTimeout,
     // h2
     maxConcurrentStreams,
-    allowH2
+    allowH2,
+    webSocket
   } = {}) {
-    super()
+    super({ webSocket })
 
     if (keepAlive !== undefined) {
       throw new InvalidArgumentError('unsupported keepAlive, use pipelining=0 instead')
@@ -9172,15 +9290,24 @@ const { kDestroy, kClose, kClosed, kDestroyed, kDispatch, kInterceptors } = __nc
 const kOnDestroyed = Symbol('onDestroyed')
 const kOnClosed = Symbol('onClosed')
 const kInterceptedDispatch = Symbol('Intercepted Dispatch')
+const kWebSocketOptions = Symbol('webSocketOptions')
 
 class DispatcherBase extends Dispatcher {
-  constructor () {
+  constructor (opts) {
     super()
 
     this[kDestroyed] = false
     this[kOnDestroyed] = null
     this[kClosed] = false
     this[kOnClosed] = []
+    this[kWebSocketOptions] = opts?.webSocket ?? {}
+  }
+
+  get webSocketOptions () {
+    return {
+      maxFragments: this[kWebSocketOptions].maxFragments ?? 131072,
+      maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024
+    }
   }
 
   get destroyed () {
@@ -9740,8 +9867,8 @@ const kRemoveClient = Symbol('remove client')
 const kStats = Symbol('stats')
 
 class PoolBase extends DispatcherBase {
-  constructor () {
-    super()
+  constructor (opts) {
+    super(opts)
 
     this[kQueue] = new FixedQueue()
     this[kClients] = []
@@ -10000,8 +10127,6 @@ class Pool extends PoolBase {
     allowH2,
     ...options
   } = {}) {
-    super()
-
     if (connections != null && (!Number.isFinite(connections) || connections < 0)) {
       throw new InvalidArgumentError('invalid connections')
     }
@@ -10025,6 +10150,8 @@ class Pool extends PoolBase {
         ...connect
       })
     }
+
+    super(options)
 
     this[kInterceptors] = options.interceptors?.Pool && Array.isArray(options.interceptors.Pool)
       ? options.interceptors.Pool
@@ -15078,32 +15205,25 @@ function parseUnparsedAttributes (unparsedAttributes, cookieAttributeList = {}) 
     // If the attribute-name case-insensitively matches the string
     // "SameSite", the user agent MUST process the cookie-av as follows:
 
-    // 1. Let enforcement be "Default".
-    let enforcement = 'Default'
-
     const attributeValueLowercase = attributeValue.toLowerCase()
-    // 2. If cookie-av's attribute-value is a case-insensitive match for
-    //    "None", set enforcement to "None".
-    if (attributeValueLowercase.includes('none')) {
-      enforcement = 'None'
-    }
 
-    // 3. If cookie-av's attribute-value is a case-insensitive match for
-    //    "Strict", set enforcement to "Strict".
-    if (attributeValueLowercase.includes('strict')) {
-      enforcement = 'Strict'
+    // 1. If cookie-av's attribute-value is a case-insensitive match for
+    //    "None", append an attribute to the cookie-attribute-list with an
+    //    attribute-name of "SameSite" and an attribute-value of "None".
+    if (attributeValueLowercase === 'none') {
+      cookieAttributeList.sameSite = 'None'
+    } else if (attributeValueLowercase === 'strict') {
+      // 2. If cookie-av's attribute-value is a case-insensitive match for
+      //    "Strict", append an attribute to the cookie-attribute-list with
+      //    an attribute-name of "SameSite" and an attribute-value of
+      //    "Strict".
+      cookieAttributeList.sameSite = 'Strict'
+    } else if (attributeValueLowercase === 'lax') {
+      // 3. If cookie-av's attribute-value is a case-insensitive match for
+      //    "Lax", append an attribute to the cookie-attribute-list with an
+      //    attribute-name of "SameSite" and an attribute-value of "Lax".
+      cookieAttributeList.sameSite = 'Lax'
     }
-
-    // 4. If cookie-av's attribute-value is a case-insensitive match for
-    //    "Lax", set enforcement to "Lax".
-    if (attributeValueLowercase.includes('lax')) {
-      enforcement = 'Lax'
-    }
-
-    // 5. Append an attribute to the cookie-attribute-list with an
-    //    attribute-name of "SameSite" and an attribute-value of
-    //    enforcement.
-    cookieAttributeList.sameSite = enforcement
   } else {
     cookieAttributeList.unparsed ??= []
 
@@ -27780,40 +27900,35 @@ const tail = Buffer.from([0x00, 0x00, 0xff, 0xff])
 const kBuffer = Symbol('kBuffer')
 const kLength = Symbol('kLength')
 
-// Default maximum decompressed message size: 4 MB
-const kDefaultMaxDecompressedSize = 4 * 1024 * 1024
-
 class PerMessageDeflate {
   /** @type {import('node:zlib').InflateRaw} */
   #inflate
 
   #options = {}
 
-  /** @type {boolean} */
-  #aborted = false
-
-  /** @type {Function|null} */
-  #currentCallback = null
+  #maxPayloadSize = 0
 
   /**
    * @param {Map<string, string>} extensions
    */
-  constructor (extensions) {
+  constructor (extensions, options) {
     this.#options.serverNoContextTakeover = extensions.has('server_no_context_takeover')
     this.#options.serverMaxWindowBits = extensions.get('server_max_window_bits')
+
+    this.#maxPayloadSize = options.maxPayloadSize
   }
 
+  /**
+   * Decompress a compressed payload.
+   * @param {Buffer} chunk Compressed data
+   * @param {boolean} fin Final fragment flag
+   * @param {Function} callback Callback function
+   */
   decompress (chunk, fin, callback) {
     // An endpoint uses the following algorithm to decompress a message.
     // 1.  Append 4 octets of 0x00 0x00 0xff 0xff to the tail end of the
     //     payload of the message.
     // 2.  Decompress the resulting data using DEFLATE.
-
-    if (this.#aborted) {
-      callback(new MessageSizeExceededError())
-      return
-    }
-
     if (!this.#inflate) {
       let windowBits = Z_DEFAULT_WINDOWBITS
 
@@ -27836,23 +27951,12 @@ class PerMessageDeflate {
       this.#inflate[kLength] = 0
 
       this.#inflate.on('data', (data) => {
-        if (this.#aborted) {
-          return
-        }
-
         this.#inflate[kLength] += data.length
 
-        if (this.#inflate[kLength] > kDefaultMaxDecompressedSize) {
-          this.#aborted = true
+        if (this.#maxPayloadSize > 0 && this.#inflate[kLength] > this.#maxPayloadSize) {
+          callback(new MessageSizeExceededError())
           this.#inflate.removeAllListeners()
-          this.#inflate.destroy()
           this.#inflate = null
-
-          if (this.#currentCallback) {
-            const cb = this.#currentCallback
-            this.#currentCallback = null
-            cb(new MessageSizeExceededError())
-          }
           return
         }
 
@@ -27865,14 +27969,13 @@ class PerMessageDeflate {
       })
     }
 
-    this.#currentCallback = callback
     this.#inflate.write(chunk)
     if (fin) {
       this.#inflate.write(tail)
     }
 
     this.#inflate.flush(() => {
-      if (this.#aborted || !this.#inflate) {
+      if (!this.#inflate) {
         return
       }
 
@@ -27880,7 +27983,6 @@ class PerMessageDeflate {
 
       this.#inflate[kBuffer].length = 0
       this.#inflate[kLength] = 0
-      this.#currentCallback = null
 
       callback(null, full)
     })
@@ -27915,6 +28017,12 @@ const {
 const { WebsocketFrameSend } = __nccwpck_require__(3264)
 const { closeWebSocketConnection } = __nccwpck_require__(6897)
 const { PerMessageDeflate } = __nccwpck_require__(9469)
+const { MessageSizeExceededError } = __nccwpck_require__(8707)
+
+function failWebsocketConnectionWithCode (ws, code, reason) {
+  closeWebSocketConnection(ws, code, reason, Buffer.byteLength(reason))
+  failWebsocketConnection(ws, reason)
+}
 
 // This code was influenced by ws released under the MIT license.
 // Copyright (c) 2011 Einar Otto Stangvik <einaros@gmail.com>
@@ -27923,6 +28031,7 @@ const { PerMessageDeflate } = __nccwpck_require__(9469)
 
 class ByteParser extends Writable {
   #buffers = []
+  #fragmentsBytes = 0
   #byteOffset = 0
   #loop = false
 
@@ -27934,18 +28043,27 @@ class ByteParser extends Writable {
   /** @type {Map<string, PerMessageDeflate>} */
   #extensions
 
+  /** @type {number} */
+  #maxFragments
+
+  /** @type {number} */
+  #maxPayloadSize
+
   /**
    * @param {import('./websocket').WebSocket} ws
    * @param {Map<string, string>|null} extensions
+   * @param {{ maxFragments?: number, maxPayloadSize?: number }} [options]
    */
-  constructor (ws, extensions) {
+  constructor (ws, extensions, options = {}) {
     super()
 
     this.ws = ws
     this.#extensions = extensions == null ? new Map() : extensions
+    this.#maxFragments = options.maxFragments ?? 0
+    this.#maxPayloadSize = options.maxPayloadSize ?? 0
 
     if (this.#extensions.has('permessage-deflate')) {
-      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions))
+      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions, options))
     }
   }
 
@@ -27959,6 +28077,19 @@ class ByteParser extends Writable {
     this.#loop = true
 
     this.run(callback)
+  }
+
+  #validatePayloadLength () {
+    if (
+      this.#maxPayloadSize > 0 &&
+      !isControlFrame(this.#info.opcode) &&
+      this.#info.payloadLength + this.#fragmentsBytes > this.#maxPayloadSize
+    ) {
+      failWebsocketConnectionWithCode(this.ws, 1009, 'Payload size exceeds maximum allowed size')
+      return false
+    }
+
+    return true
   }
 
   /**
@@ -28049,6 +28180,10 @@ class ByteParser extends Writable {
         if (payloadLength <= 125) {
           this.#info.payloadLength = payloadLength
           this.#state = parserStates.READ_DATA
+
+          if (!this.#validatePayloadLength()) {
+            return
+          }
         } else if (payloadLength === 126) {
           this.#state = parserStates.PAYLOADLENGTH_16
         } else if (payloadLength === 127) {
@@ -28073,6 +28208,10 @@ class ByteParser extends Writable {
 
         this.#info.payloadLength = buffer.readUInt16BE(0)
         this.#state = parserStates.READ_DATA
+
+        if (!this.#validatePayloadLength()) {
+          return
+        }
       } else if (this.#state === parserStates.PAYLOADLENGTH_64) {
         if (this.#byteOffset < 8) {
           return callback()
@@ -28095,6 +28234,10 @@ class ByteParser extends Writable {
 
         this.#info.payloadLength = lower
         this.#state = parserStates.READ_DATA
+
+        if (!this.#validatePayloadLength()) {
+          return
+        }
       } else if (this.#state === parserStates.READ_DATA) {
         if (this.#byteOffset < this.#info.payloadLength) {
           return callback()
@@ -28107,42 +28250,58 @@ class ByteParser extends Writable {
           this.#state = parserStates.INFO
         } else {
           if (!this.#info.compressed) {
-            this.#fragments.push(body)
+            if (!this.writeFragments(body)) {
+              return
+            }
+
+            if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
+              failWebsocketConnectionWithCode(this.ws, 1009, new MessageSizeExceededError().message)
+              return
+            }
 
             // If the frame is not fragmented, a message has been received.
             // If the frame is fragmented, it will terminate with a fin bit set
             // and an opcode of 0 (continuation), therefore we handle that when
             // parsing continuation frames, not here.
             if (!this.#info.fragmented && this.#info.fin) {
-              const fullMessage = Buffer.concat(this.#fragments)
-              websocketMessageReceived(this.ws, this.#info.binaryType, fullMessage)
-              this.#fragments.length = 0
+              websocketMessageReceived(this.ws, this.#info.binaryType, this.consumeFragments())
             }
 
             this.#state = parserStates.INFO
           } else {
-            this.#extensions.get('permessage-deflate').decompress(body, this.#info.fin, (error, data) => {
-              if (error) {
-                failWebsocketConnection(this.ws, error.message)
-                return
-              }
+            this.#extensions.get('permessage-deflate').decompress(
+              body,
+              this.#info.fin,
+              (error, data) => {
+                if (error) {
+                  const code = error instanceof MessageSizeExceededError ? 1009 : 1007
+                  failWebsocketConnectionWithCode(this.ws, code, error.message)
+                  return
+                }
 
-              this.#fragments.push(data)
+                if (!this.writeFragments(data)) {
+                  return
+                }
 
-              if (!this.#info.fin) {
-                this.#state = parserStates.INFO
+                if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
+                  failWebsocketConnectionWithCode(this.ws, 1009, new MessageSizeExceededError().message)
+                  return
+                }
+
+                if (!this.#info.fin) {
+                  this.#state = parserStates.INFO
+                  this.#loop = true
+                  this.run(callback)
+                  return
+                }
+
+                websocketMessageReceived(this.ws, this.#info.binaryType, this.consumeFragments())
+
                 this.#loop = true
+                this.#state = parserStates.INFO
                 this.run(callback)
-                return
               }
-
-              websocketMessageReceived(this.ws, this.#info.binaryType, Buffer.concat(this.#fragments))
-
-              this.#loop = true
-              this.#state = parserStates.INFO
-              this.#fragments.length = 0
-              this.run(callback)
-            })
+            )
 
             this.#loop = false
             break
@@ -28192,6 +28351,35 @@ class ByteParser extends Writable {
     this.#byteOffset -= n
 
     return buffer
+  }
+
+  writeFragments (fragment) {
+    if (
+      this.#maxFragments > 0 &&
+      this.#fragments.length === this.#maxFragments
+    ) {
+      failWebsocketConnectionWithCode(this.ws, 1008, 'Too many message fragments')
+      return false
+    }
+
+    this.#fragmentsBytes += fragment.length
+    this.#fragments.push(fragment)
+    return true
+  }
+
+  consumeFragments () {
+    const fragments = this.#fragments
+
+    if (fragments.length === 1) {
+      this.#fragmentsBytes = 0
+      return fragments.shift()
+    }
+
+    const output = Buffer.concat(fragments, this.#fragmentsBytes)
+    this.#fragments = []
+    this.#fragmentsBytes = 0
+
+    return output
   }
 
   parseCloseBody (data) {
@@ -29225,7 +29413,14 @@ class WebSocket extends EventTarget {
     // once this happens, the connection is open
     this[kResponse] = response
 
-    const parser = new ByteParser(this, parsedExtensions)
+    const webSocketOptions = this[kController]?.dispatcher?.webSocketOptions
+    const maxFragments = webSocketOptions?.maxFragments
+    const maxPayloadSize = webSocketOptions?.maxPayloadSize
+
+    const parser = new ByteParser(this, parsedExtensions, {
+      maxFragments,
+      maxPayloadSize
+    })
     parser.on('drain', onParserDrain)
     parser.on('error', onParserError.bind(this))
 
@@ -44195,6 +44390,8 @@ class Cache {
 /* harmony import */ var yaml__WEBPACK_IMPORTED_MODULE_1__ = __nccwpck_require__(8815);
 /* harmony import */ var _browser_lib_Data_js__WEBPACK_IMPORTED_MODULE_2__ = __nccwpck_require__(5497);
 /* harmony import */ var _Sass_js__WEBPACK_IMPORTED_MODULE_3__ = __nccwpck_require__(4057);
+/* harmony import */ var _node_lib_Valid_js__WEBPACK_IMPORTED_MODULE_4__ = __nccwpck_require__(1293);
+
 
 
 
@@ -44205,30 +44402,39 @@ class Cache {
  * node-specific dependencies.
  */
 class Data extends _browser_lib_Data_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A {
+  static LOAD_DATA_TYPES = Object.freeze({
+    json: Object.freeze([JSON]),    // least permissive
+    json5: Object.freeze([json5__WEBPACK_IMPORTED_MODULE_0__]),
+    yaml: Object.freeze([yaml__WEBPACK_IMPORTED_MODULE_1__]),    // most permissive
+  })
+
   /**
-   * Parses text content as structured data (JSON5 or YAML).
+   * Parses text content as structured data (JSON, JSON5, or YAML).
+   *
+   * The `json` type uses strict JSON parsing and will NOT accept JSON5
+   * extensions (comments, trailing commas, unquoted keys); use `json5` for
+   * that. The `any` type tries each format from least to most permissive.
    *
    * @param {string} source - The text content to parse
-   * @param {string} [type="any"] - The expected format ("json",
-   *   "json5", "yaml", or "any")
+   * @param {string} [type="any"] - The expected format ("json", "json5",
+   *  "yaml", or "any")
    * @returns {unknown} The parsed data
-   * @throws {Sass} If content cannot be parsed or type is
-   *   unsupported
+   * @throws {Sass} If content cannot be parsed or type is unsupported
    */
   static textAsData(source, type="any") {
-    const normalizedType = type.toLowerCase()
-    const toTry = {
-      json5: [json5__WEBPACK_IMPORTED_MODULE_0__],
-      json: [json5__WEBPACK_IMPORTED_MODULE_0__],
-      yaml: [yaml__WEBPACK_IMPORTED_MODULE_1__],
-      any: [json5__WEBPACK_IMPORTED_MODULE_0__, yaml__WEBPACK_IMPORTED_MODULE_1__],
-    }[normalizedType]
+    _node_lib_Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(source, "String")
+    _node_lib_Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.type(type, "String")
 
-    if(!toTry) {
-      throw _Sass_js__WEBPACK_IMPORTED_MODULE_3__/* ["default"] */ .A.new(
-        `Unsupported data type '${type}'.`
-        + ` Supported types: json, json5, yaml.`)
-    }
+    const normalizedType = type.toLowerCase()
+
+    _node_lib_Valid_js__WEBPACK_IMPORTED_MODULE_4__/* ["default"] */ .A.assert(
+      normalizedType === "any" || Object.hasOwn(this.LOAD_DATA_TYPES, normalizedType),
+      `Type must be one of any, ${Object.keys(this.LOAD_DATA_TYPES).join(", ")}.`
+    )
+
+    const toTry = normalizedType === "any"
+      ? Object.values(this.LOAD_DATA_TYPES).flat()
+      : this.LOAD_DATA_TYPES[normalizedType]
 
     for(const format of toTry) {
       try {
@@ -44240,8 +44446,15 @@ class Data extends _browser_lib_Data_js__WEBPACK_IMPORTED_MODULE_2__/* ["default
       }
     }
 
+    const tried = toTry.map(format =>
+      format === JSON
+        ? "JSON"
+        : format === json5__WEBPACK_IMPORTED_MODULE_0__
+          ? "JSON5"
+          : "YAML")
+
     throw _Sass_js__WEBPACK_IMPORTED_MODULE_3__/* ["default"] */ .A.new(
-      `Content is neither valid JSON5 nor valid YAML.`)
+      `Content is not valid ${tried.join(" or ")}.`)
   }
 }
 
@@ -45651,8 +45864,9 @@ class FileObject extends _FileSystem_js__WEBPACK_IMPORTED_MODULE_7__/* ["default
   }
 
   /**
-   * Loads an object from JSON or YAML file. Attempts to parse content as JSON5
-   * first, then falls back to YAML if specified.
+   * Loads an object from a JSON, JSON5, or YAML file. With the default "any"
+   * type, attempts each format from least to most permissive (JSON, then JSON5,
+   * then YAML); a specific type restricts parsing to that format.
    *
    * @param {object} [options] - Load options
    * @param {string} [options.type="any"] - The expected type of data to parse ("json", "json5", "yaml", or "any")
@@ -45889,6 +46103,77 @@ const upperFdTypes = Object.freeze(fdTypes.map(type => type.toUpperCase()))
 const fdType = Object.freeze(
   await _browser_lib_Collection_js__WEBPACK_IMPORTED_MODULE_2__/* ["default"] */ .A.allocateObject(upperFdTypes, fdTypes)
 )
+
+// Characters that are illegal in filenames on common operating systems.
+// Windows is the strictest, forbidding < > : " / \ | ? * along with the
+// control characters (0x00-0x1F); POSIX is a subset of these. Matching the
+// strictest set keeps sanitized names portable everywhere.
+const illegalFilenameChars = /[<>:"/\\|?*\u0000-\u001F]/
+const illegalFilenameCharsGlobal = /[<>:"/\\|?*\u0000-\u001F]/g
+
+// Windows trims trailing dots and spaces, silently changing the name, so a
+// portable filename must not end with either. This also rejects the relative
+// path indicators "." and "..", since both end with a dot. A name ends with a
+// run of these characters exactly when its final character is one, so a
+// single-character class (no `+`) detects the condition without the
+// super-linear backtracking that an anchored `/[. ]+$/` exhibits on
+// adversarial input. Stripping the whole run is handled by
+// stripTrailingDotsSpaces, a linear scan, for the same reason.
+const trailingDotOrSpace = /[. ]$/
+
+// Device names reserved by Windows, illegal as a filename with or without an
+// extension (e.g. "CON", "con.txt", "LPT1"). The match is case-insensitive.
+const reservedFilenames = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
+
+// Maximum length, in bytes, of a single path component. ext4, APFS, NTFS and
+// exFAT all cap a name at 255 bytes — note bytes, not characters, so a single
+// multi-byte UTF-8 codepoint counts for more than one against the budget.
+const maxFilenameBytes = 255
+
+/**
+ * Truncate a string to at most `maxBytes` UTF-8 bytes without splitting a
+ * multi-byte codepoint. When the byte limit lands in the middle of a
+ * character, that whole character is dropped rather than left half-encoded.
+ *
+ * @private
+ * @param {string} str - The string to truncate
+ * @param {number} maxBytes - The maximum length in UTF-8 bytes
+ * @returns {string} The truncated string, never exceeding `maxBytes` bytes
+ */
+function truncateToBytes(str, maxBytes) {
+  const buf = Buffer.from(str, "utf8")
+
+  if(buf.length <= maxBytes)
+    return str
+
+  // Back up over UTF-8 continuation bytes (0b10xxxxxx) so the cut never lands
+  // inside a multi-byte sequence, dropping the straddling character entirely.
+  let end = maxBytes
+
+  while(end > 0 && (buf[end] & 0xC0) === 0x80)
+    end--
+
+  return buf.subarray(0, end).toString("utf8")
+}
+
+/**
+ * Strip any trailing dots and spaces from a string. Windows trims these
+ * silently, so a portable name must not end with them. Implemented as a linear
+ * scan rather than an anchored `/[. ]+$/` replace, which can backtrack
+ * super-linearly on adversarial input.
+ *
+ * @private
+ * @param {string} str - The string to trim
+ * @returns {string} The string with any trailing dots and spaces removed
+ */
+function stripTrailingDotsSpaces(str) {
+  let end = str.length
+
+  while(end > 0 && (str[end - 1] === "." || str[end - 1] === " "))
+    end--
+
+  return str.slice(0, end)
+}
 
 /**
  * File system utility class for path operations and file discovery.
@@ -46275,6 +46560,139 @@ class FileSystem {
     _Valid_js__WEBPACK_IMPORTED_MODULE_5__/* ["default"] */ .A.type(pathName, "String", {allowEmpty: false})
 
     return node_path__WEBPACK_IMPORTED_MODULE_0__.parse(pathName)
+  }
+
+  /**
+   * Determine whether a string is safe to use as a filename on every common
+   * operating system.
+   *
+   * A name is sane only when it would be legal everywhere, so the checks span
+   * the union of platform rules rather than any single OS:
+   *
+   * - No characters that are illegal on common filesystems. Windows is the
+   *   strictest, forbidding `< > : " / \ | ? *` and the control characters
+   *   (0x00-0x1F); POSIX is a subset of these.
+   * - No trailing dot or space (Windows silently trims them).
+   * - Not a Windows reserved device name, with or without an extension
+   *   (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`).
+   * - Not the relative path indicators `.` or `..`.
+   * - No longer than 255 bytes — the per-component limit on ext4, APFS, NTFS
+   *   and exFAT. Length is counted in UTF-8 bytes, not characters, so a single
+   *   multi-byte codepoint costs more than one toward the limit.
+   *
+   * @static
+   * @param {string} str - The candidate filename to test
+   * @returns {boolean} True if the string is a legal filename on every common OS
+   * @throws {Sass} If str is not a non-empty string
+   * @example
+   * FS.sane("report.txt")  // true
+   * FS.sane("a/b:c.txt")   // false (illegal character)
+   * FS.sane("name ")       // false (trailing space)
+   * FS.sane("CON")         // false (reserved on Windows)
+   * FS.sane("x".repeat(256))  // false (exceeds 255 bytes)
+   */
+  static sane(str) {
+    _Valid_js__WEBPACK_IMPORTED_MODULE_5__/* ["default"] */ .A.type(str, "String", {allowEmpty: false})
+
+    return !illegalFilenameChars.test(str)
+      && !trailingDotOrSpace.test(str)
+      && !reservedFilenames.test(str)
+      && Buffer.byteLength(str) <= maxFilenameBytes
+  }
+
+  /**
+   * Rewrite a string into a filename that is legal on every common operating
+   * system.
+   *
+   * Applies the union of platform rules (see {@link FileSystem.sane}) so the
+   * result is portable regardless of where it is used:
+   *
+   * - Every character illegal on common filesystems is replaced with
+   *   `replacement` (defaults to an underscore).
+   * - Trailing dots and spaces are stripped (Windows trims them anyway).
+   * - Windows reserved device names are suffixed with `replacement` so they
+   *   are no longer reserved (e.g. `CON` becomes `CON_`, `CON.txt` becomes
+   *   `CON_.txt`).
+   * - Names longer than 255 bytes are truncated to fit that limit. The base
+   *   name is shortened while the extension is preserved where it fits, and
+   *   truncation never splits a multi-byte UTF-8 codepoint.
+   *
+   * A custom `replacement` is itself validated: it must contain no illegal
+   * characters, otherwise the result could remain unsafe.
+   *
+   * Note that degenerate inputs can sanitize to an empty string — for example
+   * an empty `replacement` applied to a name of only illegal characters, or a
+   * relative indicator such as `"."` or `".."` whose trailing dots are
+   * stripped. The empty string is not itself a legal filename, so callers that
+   * need a guaranteed-usable name should treat an empty result as a signal to
+   * fall back to a default of their own.
+   *
+   * @static
+   * @param {string} str - The filename to sanitize
+   * @param {string} [replacement] - The substitute for illegal characters (defaults to "_")
+   * @returns {string} A filename legal on every common OS, or "" when the input sanitizes to nothing
+   * @throws {Sass} If str is not a non-empty string
+   * @throws {Sass} If replacement is not a string, or itself contains OS-illegal characters
+   * @example
+   * FS.sanitize("a/b:c.txt")        // "a_b_c.txt"
+   * FS.sanitize("a/b:c.txt", "-")   // "a-b-c.txt"
+   * FS.sanitize("name. ")           // "name"
+   * FS.sanitize("CON.txt")          // "CON_.txt"
+   * FS.sanitize("..")               // "" (caller should supply a fallback)
+   */
+  static sanitize(str, replacement="_") {
+    _Valid_js__WEBPACK_IMPORTED_MODULE_5__/* ["default"] */ .A.type(str, "String", {allowEmpty: false})
+    _Valid_js__WEBPACK_IMPORTED_MODULE_5__/* ["default"] */ .A.type(replacement, "String")
+
+    _Valid_js__WEBPACK_IMPORTED_MODULE_5__/* ["default"] */ .A.assert(
+      !illegalFilenameChars.test(replacement),
+      `replacement must not contain OS-illegal characters, got: ${replacement}`
+    )
+
+    // Swap illegal characters, then drop trailing dots/spaces that Windows
+    // would silently strip.
+    const cleaned = stripTrailingDotsSpaces(
+      str.replace(illegalFilenameCharsGlobal, replacement)
+    )
+
+    // Defuse Windows reserved device names by suffixing the reserved portion,
+    // preserving any extension (e.g. "CON" -> "CON_"). A replacement that
+    // cannot actually change the name -- an empty string, or dots/spaces that
+    // get stripped straight back off -- leaves it reserved; like any other
+    // input that cannot be made safe, fall back to the empty string.
+    let defused = cleaned
+
+    if(reservedFilenames.test(cleaned)) {
+      defused = stripTrailingDotsSpaces(
+        cleaned.replace(/^([^.]*)/, `$1${replacement}`)
+      )
+
+      if(reservedFilenames.test(defused))
+        return ""
+    }
+
+    // Enforce the 255-byte component limit. Truncate the base name while
+    // keeping the extension where it fits; a cut can re-expose a trailing dot
+    // or space, so strip those again before reattaching the extension.
+    if(Buffer.byteLength(defused) <= maxFilenameBytes)
+      return defused
+
+    const dot = defused.lastIndexOf(".")
+    const ext = dot > 0 ? defused.slice(dot) : ""
+    const extBytes = Buffer.byteLength(ext)
+
+    // An extension that alone blows the budget cannot be preserved; truncate
+    // the whole name instead. The cut can land on a dot or space, so strip any
+    // the same way the base-truncation path below does.
+    if(extBytes >= maxFilenameBytes)
+      return stripTrailingDotsSpaces(truncateToBytes(defused, maxFilenameBytes))
+
+    const base = dot > 0 ? defused.slice(0, dot) : defused
+    const truncatedBase = stripTrailingDotsSpaces(
+      truncateToBytes(base, maxFilenameBytes - extBytes)
+    )
+
+    return truncatedBase + ext
   }
 
   /**
@@ -48305,7 +48723,6 @@ class Term {
     const forced = "FORCE_COLOR" in external_node_process_.env
     const noColor = !forced
       && typeof external_node_process_.env.NO_COLOR === "string"
-      && external_node_process_.env.NO_COLOR.length > 0
 
     const supported = noColor
       ? false
@@ -49415,7 +49832,7 @@ void (async() => {
     const versionPattern = new RegExp(_actions_core__WEBPACK_IMPORTED_MODULE_0__/* .getInput */ .V4("version_pattern") || "v\\d+\\.\\d+\\.\\d+")
 
     if(!await source.exists)
-      throw _gesslar_toolkit__WEBPACK_IMPORTED_MODULE_1__/* .Sass */ .f.new(`No such file ${source.real.url}`)
+      throw _gesslar_toolkit__WEBPACK_IMPORTED_MODULE_1__/* .Sass */ .f.new(`No such file ${source.url}`)
 
     // Determine current version
     let currentVersion
