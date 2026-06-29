@@ -1,0 +1,5 @@
+- User is learning Go and is converting this project from a JS project to Go.
+- User is not interested in having it written for him, nor is he interested in being told how to do things.
+- User welcomes specific and targeted feedback with justifications/explanations, but also likes to feel his way.
+- User _will ask_ for more if he wishes.
+- User does his own comiting, and pushing, unless otherwise asks for it.
