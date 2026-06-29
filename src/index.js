@@ -44,10 +44,13 @@ void (async() => {
 
     // Use compare-versions to find the latest tag
     const latestTag = tags.reduce((latest, current) => {
-      const latestVer = latest || null
+      // No incumbent yet: adopt the first tag rather than comparing against
+      // null (which compareVersions.compare would throw on, leaving latest "").
+      if(!latest)
+        return current
 
       try {
-        return compareVersions.compare(current, latestVer, ">") ? current : latest
+        return compareVersions.compare(current, latest, ">") ? current : latest
       } catch {
       // If comparison fails, fallback to the current latest
         return latest
